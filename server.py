@@ -20,10 +20,11 @@ import smtplib
 import sys
 import imaplib
 import re
+import os
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-PORT = 3000
+PORT = int(os.environ.get('PORT', 3000))
 
 class SMTPRelayHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):

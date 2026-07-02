@@ -18,7 +18,7 @@ const cors = require("cors");
 const nodemailer = require("nodemailer");
 
 const app = express();
-const PORT = process.argv[2] ? parseInt(process.argv[2], 10) : 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : (process.argv[2] ? parseInt(process.argv[2], 10) : 3000);
 
 // Enable CORS and JSON parsing
 app.use(cors());
