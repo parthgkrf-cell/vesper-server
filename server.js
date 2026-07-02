@@ -120,7 +120,7 @@ app.post("/send", async (req, res) => {
       }
       headers.push(`Subject: ${subject}`);
       headers.push(`MIME-Version: 1.0`);
-      headers.push(`Content-Type: text/plain; charset=utf-8`);
+      headers.push(`Content-Type: text/html; charset=utf-8`);
       headers.push(`Content-Transfer-Encoding: 7bit`);
       headers.push(``);
 
@@ -172,7 +172,7 @@ app.post("/send", async (req, res) => {
       from: senderEmail ? `"${senderEmail}" <${user}>` : user,
       to: recipientEmail,
       subject: subject,
-      text: body // HTML body can also be sent if formatted in template
+      html: body
     };
 
     if (cc) {

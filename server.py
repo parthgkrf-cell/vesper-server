@@ -112,8 +112,8 @@ class SMTPRelayHandler(http.server.BaseHTTPRequestHandler):
                 msg['Cc'] = cc
             msg['Subject'] = subject
             
-            # Format text body (supports standard text content)
-            msg.attach(MIMEText(body, 'plain', 'utf-8'))
+            # Format text body as HTML
+            msg.attach(MIMEText(body, 'html', 'utf-8'))
 
             # Setup SMTP Connection
             if action == 'draft':

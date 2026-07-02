@@ -33,10 +33,17 @@ let schedulerInterval = null;
 
 // Initialize Application on Page Load
 document.addEventListener("DOMContentLoaded", () => {
+  // Load cached theme and apply it immediately
+  const cachedTheme = localStorage.getItem("vesper_theme") || "dark";
+  document.documentElement.setAttribute("data-theme", cachedTheme);
+  
   loadStateFromCache();
   initializeUI();
   setupEventListeners();
   startClock();
+  
+  // Sync the theme button icon
+  updateThemeToggleIcon(cachedTheme);
   lucide.createIcons();
   
   addLog("System initialized. Welcome to Vesper Mail Scheduler.", "system");
@@ -133,7 +140,14 @@ function initializeUI() {
   document.getElementById("email-subject-template").value = state.template.subject || "";
   document.getElementById("email-cc-template").value = state.template.cc || "";
   document.getElementById("email-bcc-template").value = state.template.bcc || "";
-  document.getElementById("email-body-template").value = state.template.body || "";
+  let bodyHtml = state.template.body || "";
+  if (bodyHtml && !bodyHtml.includes("<") && !bodyHtml.includes(">")) {
+    bodyHtml = bodyHtml.replace(/\n/g, "<br>");
+  }
+  const bodyEditor = document.getElementById("email-body-editor");
+  if (bodyEditor) {
+    bodyEditor.innerHTML = bodyHtml;
+  }
   document.getElementById("email-action-template").value = state.template.action || "send";
 
   // Populate sender accounts dropdown in compose template tab
@@ -151,6 +165,25 @@ function initializeUI() {
 
 // Setup all DOM event listeners
 function setupEventListeners() {
+  // Theme Toggle Button
+  const themeBtn = document.getElementById("theme-toggle-btn");
+  if (themeBtn) {
+    themeBtn.addEventListener("click", () => {
+      const currentTheme = document.documentElement.getAttribute("data-theme") || "dark";
+      const newTheme = currentTheme === "dark" ? "light" : "dark";
+      
+      document.documentElement.setAttribute("data-theme", newTheme);
+      localStorage.setItem("vesper_theme", newTheme);
+      
+      updateThemeToggleIcon(newTheme);
+      addLog(`Theme changed to: ${newTheme} mode`, "system");
+      showToast(`Switched to ${newTheme === 'dark' ? 'Dark' : 'Light'} Mode`, "success");
+      
+      // Update live preview in case text rendering styles need to re-align
+      updateLivePreview();
+    });
+  }
+
   // Tab Navigation
   document.querySelectorAll(".nav-item").forEach(item => {
     item.addEventListener("click", () => {
@@ -284,7 +317,7 @@ function setupEventListeners() {
   const subjectInput = document.getElementById("email-subject-template");
   const ccInput = document.getElementById("email-cc-template");
   const bccInput = document.getElementById("email-bcc-template");
-  const bodyTextarea = document.getElementById("email-body-template");
+  const bodyEditor = document.getElementById("email-body-editor");
   const actionSelect = document.getElementById("email-action-template");
   const senderSelect = document.getElementById("email-sender-template");
 
@@ -310,11 +343,44 @@ function setupEventListeners() {
     });
   }
 
-  bodyTextarea.addEventListener("input", () => {
-    state.template.body = bodyTextarea.value;
-    saveTemplateToCache();
-    updateLivePreview();
-  });
+  // CC and BCC toggles in Gmail style
+  const toggleCc = document.getElementById("toggle-cc-field");
+  const toggleBcc = document.getElementById("toggle-bcc-field");
+  const rowCc = document.getElementById("cc-field-row");
+  const rowBcc = document.getElementById("bcc-field-row");
+  
+  if (toggleCc && rowCc) {
+    toggleCc.addEventListener("click", () => {
+      rowCc.classList.toggle("hidden");
+    });
+  }
+  if (toggleBcc && rowBcc) {
+    toggleBcc.addEventListener("click", () => {
+      rowBcc.classList.toggle("hidden");
+    });
+  }
+
+  // Persist visibility of CC/BCC if they have values on load
+  if (state.template.cc && rowCc) rowCc.classList.remove("hidden");
+  if (state.template.bcc && rowBcc) rowBcc.classList.remove("hidden");
+
+  // Gmail Save Status Debounce
+  let saveTimeout = null;
+  if (bodyEditor) {
+    bodyEditor.addEventListener("input", () => {
+      const statusEl = document.getElementById("gmail-save-status");
+      if (statusEl) statusEl.textContent = "Saving...";
+      
+      state.template.body = bodyEditor.innerHTML;
+      saveTemplateToCache();
+      updateLivePreview();
+      
+      if (saveTimeout) clearTimeout(saveTimeout);
+      saveTimeout = setTimeout(() => {
+        if (statusEl) statusEl.textContent = "Draft saved";
+      }, 800);
+    });
+  }
 
   if (actionSelect) {
     actionSelect.addEventListener("change", (e) => {
@@ -336,26 +402,186 @@ function setupEventListeners() {
     });
   }
 
-  // Tag buttons insert variables into editor at cursor
-  document.querySelectorAll(".btn-tag").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const tag = btn.getAttribute("data-tag");
-      const textarea = document.getElementById("email-body-template");
-      
-      const start = textarea.selectionStart;
-      const end = textarea.selectionEnd;
-      const text = textarea.value;
-      
-      textarea.value = text.substring(0, start) + tag + text.substring(end);
-      textarea.focus();
-      textarea.selectionStart = textarea.selectionEnd = start + tag.length;
-      
-      state.template.body = textarea.value;
+  // Gmail toolbar formatting options toggle
+  const btnToggleFormat = document.getElementById("btn-toggle-formatting");
+  const formattingToolbar = document.getElementById("gmail-formatting-toolbar");
+  if (btnToggleFormat && formattingToolbar) {
+    btnToggleFormat.addEventListener("click", () => {
+      btnToggleFormat.classList.toggle("active");
+      formattingToolbar.classList.toggle("hidden");
+    });
+  }
+
+  // Gmail insert link button
+  const btnInsertLink = document.getElementById("btn-insert-link");
+  if (btnInsertLink) {
+    btnInsertLink.addEventListener("click", () => {
+      const url = prompt("Enter URL:", "https://");
+      if (url) {
+        document.execCommand("createLink", false, url);
+        bodyEditor.focus();
+        state.template.body = bodyEditor.innerHTML;
+        saveTemplateToCache();
+        updateLivePreview();
+      }
+    });
+  }
+
+  // Gmail text color picker toggles
+  const btnTextColor = document.getElementById("btn-text-color");
+  const textColorDropdown = document.getElementById("text-color-dropdown");
+  if (btnTextColor && textColorDropdown) {
+    btnTextColor.addEventListener("click", (e) => {
+      e.stopPropagation();
+      textColorDropdown.classList.toggle("hidden");
+    });
+    document.addEventListener("click", () => {
+      textColorDropdown.classList.add("hidden");
+    });
+  }
+
+  // Color selection in picker
+  document.querySelectorAll(".color-box").forEach(box => {
+    box.addEventListener("click", () => {
+      const type = box.getAttribute("data-type");
+      const color = box.getAttribute("data-color");
+      document.execCommand(type, false, color);
+      bodyEditor.focus();
+      state.template.body = bodyEditor.innerHTML;
       saveTemplateToCache();
       updateLivePreview();
-      showToast(`Inserted ${tag}`, "info");
     });
   });
+
+  // Custom Color input listener
+  const customColorInput = document.getElementById("custom-color-input");
+  const customColorType = document.getElementById("custom-color-type");
+  if (customColorInput && customColorType) {
+    // Stop click propagation so dropdown doesn't close
+    customColorInput.addEventListener("click", (e) => {
+      e.stopPropagation();
+    });
+    customColorType.addEventListener("click", (e) => {
+      e.stopPropagation();
+    });
+    
+    customColorInput.addEventListener("change", (e) => {
+      const color = e.target.value;
+      const type = customColorType.value; // 'forecolor' or 'backcolor'
+      document.execCommand(type, false, color);
+      bodyEditor.focus();
+      state.template.body = bodyEditor.innerHTML;
+      saveTemplateToCache();
+      updateLivePreview();
+    });
+  }
+
+  // Formatting commands in toolbar
+  document.querySelectorAll(".toolbar-btn").forEach(btn => {
+    const command = btn.getAttribute("data-command");
+    if (command) {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        document.execCommand(command, false, null);
+        btn.classList.toggle("active", document.queryCommandState(command));
+        bodyEditor.focus();
+        state.template.body = bodyEditor.innerHTML;
+        saveTemplateToCache();
+        updateLivePreview();
+      });
+    }
+  });
+
+  // Font family dropdown
+  const fontSelect = document.getElementById("editor-font-family");
+  if (fontSelect) {
+    fontSelect.addEventListener("change", (e) => {
+      document.execCommand("fontName", false, e.target.value);
+      bodyEditor.focus();
+      state.template.body = bodyEditor.innerHTML;
+      saveTemplateToCache();
+      updateLivePreview();
+    });
+  }
+
+  // Font size dropdown
+  const sizeSelect = document.getElementById("editor-font-size");
+  if (sizeSelect) {
+    sizeSelect.addEventListener("change", (e) => {
+      document.execCommand("fontSize", false, e.target.value);
+      bodyEditor.focus();
+      state.template.body = bodyEditor.innerHTML;
+      saveTemplateToCache();
+      updateLivePreview();
+    });
+  }
+
+  // Gmail Merge tags dropdown toggle
+  const btnMergeTags = document.getElementById("btn-show-merge-tags");
+  const mergeTagsMenu = document.getElementById("gmail-merge-tags-menu");
+  if (btnMergeTags && mergeTagsMenu) {
+    btnMergeTags.addEventListener("click", (e) => {
+      e.stopPropagation();
+      mergeTagsMenu.classList.toggle("hidden");
+    });
+    document.addEventListener("click", () => {
+      mergeTagsMenu.classList.add("hidden");
+    });
+
+    document.querySelectorAll(".merge-tag-item").forEach(item => {
+      item.addEventListener("click", () => {
+        const tag = item.getAttribute("data-tag");
+        bodyEditor.focus();
+        insertTextAtCursor(tag);
+        state.template.body = bodyEditor.innerHTML;
+        saveTemplateToCache();
+        updateLivePreview();
+      });
+    });
+  }
+
+  // Discard button in Gmail footer
+  const btnDiscard = document.getElementById("btn-discard-gmail-body");
+  if (btnDiscard) {
+    btnDiscard.addEventListener("click", () => {
+      if (confirm("Are you sure you want to clear the template message body?")) {
+        if (bodyEditor) bodyEditor.innerHTML = "";
+        state.template.body = "";
+        saveTemplateToCache();
+        updateLivePreview();
+        showToast("Composer body cleared", "info");
+      }
+    });
+  }
+
+  // Save template button in Gmail footer
+  const btnSaveGmail = document.getElementById("btn-save-template-gmail");
+  if (btnSaveGmail) {
+    btnSaveGmail.addEventListener("click", () => {
+      saveTemplateToCache();
+      showToast("Template saved successfully!", "success");
+    });
+  }
+
+  // Gmail header X clear button
+  const btnClearHdr = document.getElementById("btn-discard-gmail-header");
+  if (btnClearHdr) {
+    btnClearHdr.addEventListener("click", () => {
+      if (confirm("Are you sure you want to clear the entire composer fields?")) {
+        subjectInput.value = "";
+        state.template.subject = "";
+        ccInput.value = "";
+        state.template.cc = "";
+        bccInput.value = "";
+        state.template.bcc = "";
+        if (bodyEditor) bodyEditor.innerHTML = "";
+        state.template.body = "";
+        saveTemplateToCache();
+        updateLivePreview();
+        showToast("Composer fields reset", "info");
+      }
+    });
+  }
 
   // Live preview recipient dropdown trigger
   document.getElementById("preview-recipient-dropdown").addEventListener("change", () => {
@@ -705,12 +931,12 @@ function handleExcelFile(file) {
   reader.onload = (e) => {
     try {
       const data = e.target.result;
-      const workbook = XLSX.read(data, { type: "binary", cellDates: true });
+      const workbook = XLSX.read(data, { type: "binary" }); // Removed cellDates: true to avoid timezone shifts
       
       const sheetName = workbook.SheetNames[0];
       const sheet = workbook.Sheets[sheetName];
       
-      const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+      const rows = XLSX.utils.sheet_to_json(sheet, { raw: false, defval: "" }); // raw: false gets formatted strings exactly as shown in Excel
       
       if (rows.length === 0) {
         throw new Error("The selected Excel sheet contains no rows of data.");
@@ -752,23 +978,34 @@ function processImportedRows(rows) {
   let invalidCounter = 0;
 
   rows.forEach((row, index) => {
+    const getStringValue = (val) => {
+      if (val === undefined || val === null) return "";
+      return String(val).trim();
+    };
+
     const nameKey = getHeaderKey(row, ["Name", "First Name", "Recipient Name", "Full Name", "Contact Name"]);
     const emailKey = getHeaderKey(row, ["Email", "Email Address", "Mail", "EmailID"]);
     const affKey = getHeaderKey(row, ["Affiliation", "Company", "Organization", "Aff"]);
-    const timeKey = getHeaderKey(row, ["Time", "Schedule Time", "Send Time", "Schedule", "Date"]);
+    const dateKey = getHeaderKey(row, ["Date", "Mail Date", "Scheduled Date"]);
+    const techSchedKey = getHeaderKey(row, ["Technical Schedual Name", "Technical Schedule Name", "Tech Schedule", "Tech Schedual", "Schedule Name", "tsname"]);
+    const timeKey = getHeaderKey(row, ["Time", "Event Time", "Time Tag"]);
     const ccKey = getHeaderKey(row, ["CC", "Cc", "Cc Email", "Carbon Copy"]);
     const bccKey = getHeaderKey(row, ["BCC", "Bcc", "Bcc Email", "Blind Carbon Copy"]);
     const senderKey = getHeaderKey(row, ["Sender", "Sender Email", "From", "Send From"]);
     const actionKey = getHeaderKey(row, ["Action", "Type", "Method", "Mode", "Scheduling Action"]);
+    const sTimeKey = getHeaderKey(row, ["S_Time", "S-Time", "STime", "S Time", "Schedule Time", "Send Time", "Schedule"]);
 
-    const name = nameKey ? String(row[nameKey]).trim() : "";
-    const email = emailKey ? String(row[emailKey]).trim() : "";
-    const affiliation = affKey ? String(row[affKey]).trim() : "Independent";
-    const rawTime = timeKey ? row[timeKey] : "";
-    const cc = ccKey ? String(row[ccKey]).trim() : "";
-    const bcc = bccKey ? String(row[bccKey]).trim() : "";
+    const name = nameKey ? getStringValue(row[nameKey]) : "";
+    const email = emailKey ? getStringValue(row[emailKey]) : "";
+    const affiliation = affKey ? getStringValue(row[affKey]) : "Independent";
+    const date = dateKey ? getStringValue(row[dateKey]) : "";
+    const techScheduleName = techSchedKey ? getStringValue(row[techSchedKey]) : "";
+    const time = timeKey ? getStringValue(row[timeKey]) : "";
+    const cc = ccKey ? getStringValue(row[ccKey]) : "";
+    const bcc = bccKey ? getStringValue(row[bccKey]) : "";
     const senderEmailStr = senderKey ? String(row[senderKey]).trim().toLowerCase() : "";
     const actionStr = actionKey ? String(row[actionKey]).trim().toLowerCase() : "";
+    const rawSTime = sTimeKey ? row[sTimeKey] : "";
 
     // Require Name and Email
     if (!name || !email) {
@@ -776,7 +1013,7 @@ function processImportedRows(rows) {
       return;
     }
 
-    const parsedTime = parseScheduleTime(rawTime);
+    const parsedTime = parseScheduleTime(rawSTime);
     rowCounter++;
 
     // Match sender account
@@ -806,9 +1043,13 @@ function processImportedRows(rows) {
       name: name,
       email: email,
       affiliation: affiliation,
-      rawTime: String(rawTime),
+      date: date,
+      techScheduleName: techScheduleName,
+      time: time,
+      rawTime: String(rawSTime || "Now"),
       parsedTime: parsedTime || new Date(), // Defaults to immediate sending if unparseable
       senderAccountId: senderAccountId,
+      sender: senderEmailStr || (matchedAcc ? matchedAcc.user : ""),
       action: action,
       cc: cc || state.template.cc || "",
       bcc: bcc || state.template.bcc || "",
@@ -847,6 +1088,9 @@ function renderExcelTable() {
       <td class="text-bold">${escapeHtml(rec.name)}</td>
       <td class="text-teal">${escapeHtml(rec.email)}</td>
       <td>${escapeHtml(rec.affiliation)}</td>
+      <td>${escapeHtml(rec.date || "—")}</td>
+      <td>${escapeHtml(rec.techScheduleName || "—")}</td>
+      <td>${escapeHtml(rec.time || "—")}</td>
       <td><code>${escapeHtml(rec.rawTime || "Now")}</code></td>
       <td>${displayTime}</td>
     `;
@@ -1110,11 +1354,27 @@ function renderTemplate(templateStr, rec) {
   if (!templateStr) return "";
   if (!rec) return templateStr;
   
-  return templateStr
-    .replace(/{Name}/g, rec.name)
-    .replace(/{Affiliation}/g, rec.affiliation)
-    .replace(/{Email}/g, rec.email)
-    .replace(/{Time}/g, rec.parsedTime ? rec.parsedTime.toLocaleTimeString() : "Immediate");
+  let text = templateStr;
+  const replaceTag = (tag, val) => {
+    const escapedTag = tag.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    const regex = new RegExp(escapedTag, 'gi');
+    text = text.replace(regex, val || "");
+  };
+
+  replaceTag("{Name}", rec.name);
+  replaceTag("{Affiliation}", rec.affiliation);
+  replaceTag("{Date}", rec.date);
+  replaceTag("{Technical Schedual Name}", rec.techScheduleName);
+  replaceTag("{Technical Schedule Name}", rec.techScheduleName);
+  replaceTag("{tsname}", rec.techScheduleName);
+  replaceTag("{Time}", rec.time);
+  replaceTag("{Email}", rec.email);
+  replaceTag("{CC}", rec.cc);
+  replaceTag("{BCC}", rec.bcc);
+  replaceTag("{Sender}", rec.sender);
+  replaceTag("{Action}", rec.action);
+
+  return text;
 }
 
 // Render Live Preview Card
@@ -1170,7 +1430,14 @@ function updateLivePreview() {
     document.getElementById("preview-to-display").textContent = "recipient@domain.com";
     document.getElementById("preview-subject-display").textContent = state.template.subject || "No Subject";
     document.getElementById("preview-time-display").textContent = "Immediate";
-    document.getElementById("preview-body-display").textContent = state.template.body || "Compose template body...";
+    
+    const bodyTemplate = state.template.body || "Compose template body...";
+    const supportsHtml = ["brevo", "resend", "localserver", "localserver_send", "localserver_draft"].includes(state.settings.method);
+    if (supportsHtml) {
+      document.getElementById("preview-body-display").innerHTML = bodyTemplate;
+    } else {
+      document.getElementById("preview-body-display").innerHTML = escapeHtml(htmlToPlainText(bodyTemplate)).replace(/\n/g, "<br>");
+    }
     return;
   }
 
@@ -1181,8 +1448,14 @@ function updateLivePreview() {
   document.getElementById("preview-subject-display").textContent = subject || "(No Subject)";
   document.getElementById("preview-time-display").textContent = rec.parsedTime ? rec.parsedTime.toLocaleString() : "Immediate";
   
-  // Format body for display in preview (convert linebreaks to html tags if they put html content)
-  document.getElementById("preview-body-display").innerHTML = escapeHtml(body).replace(/\n/g, "<br>");
+  // Format body for display in preview
+  // If the selected mode supports rich HTML, show it as HTML directly; otherwise convert/strip to plain text
+  const supportsHtml = ["brevo", "resend", "localserver", "localserver_send", "localserver_draft"].includes(state.settings.method);
+  if (supportsHtml) {
+    document.getElementById("preview-body-display").innerHTML = body;
+  } else {
+    document.getElementById("preview-body-display").innerHTML = escapeHtml(htmlToPlainText(body)).replace(/\n/g, "<br>");
+  }
 }
 
 // Start Engine
@@ -1291,11 +1564,11 @@ function dispatchEmail(rec) {
 
   // Match active method
   if (state.settings.method === "mailto") {
-    // Mailto client trigger
+    // Mailto client trigger (needs plain text)
     try {
       const emailEncoded = encodeURIComponent(rec.email);
       const subjectEncoded = encodeURIComponent(subject);
-      const bodyEncoded = encodeURIComponent(body);
+      const bodyEncoded = encodeURIComponent(htmlToPlainText(body));
       
       let mailtoUrl = `mailto:${emailEncoded}?subject=${subjectEncoded}&body=${bodyEncoded}`;
       if (rec.cc) {
@@ -1321,11 +1594,11 @@ function dispatchEmail(rec) {
     saveRecipientsToCache();
     
   } else if (state.settings.method === "gmailweb") {
-    // Gmail Web Client compose trigger
+    // Gmail Web Client compose trigger (needs plain text)
     try {
       const emailEncoded = encodeURIComponent(rec.email);
       const subjectEncoded = encodeURIComponent(subject);
-      const bodyEncoded = encodeURIComponent(body);
+      const bodyEncoded = encodeURIComponent(htmlToPlainText(body));
       
       let gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${emailEncoded}&su=${subjectEncoded}&body=${bodyEncoded}`;
       if (rec.cc) {
@@ -1368,7 +1641,7 @@ function dispatchEmail(rec) {
         name: rec.name 
       }],
       subject: subject,
-      htmlContent: body.replace(/\n/g, "<br>") // Brevo parses HTML
+      htmlContent: body // Brevo parses HTML
     };
 
     if (rec.cc) {
@@ -1416,7 +1689,7 @@ function dispatchEmail(rec) {
       from: state.settings.resendEmail || "onboarding@resend.dev",
       to: rec.email,
       subject: subject,
-      html: body.replace(/\n/g, "<br>")
+      html: body
     };
 
     if (rec.cc) {
@@ -1735,11 +2008,11 @@ function downloadSampleExcel() {
     };
 
     const data = [
-      ["Name", "Email", "Affiliation", "Time", "CC", "BCC", "Sender", "Action"],
-      ["Devin Allen", "devin@example.com", "Acme Corporation", formatTime(t1), "manager@acme.com", "", "sender1@gmail.com", "send"],
-      ["Elena Rostova", "elena@example.com", "Apex Labs", formatTime(t2), "", "", "sender2@gmail.com", "draft"],
-      ["Dr. Marcus Vance", "marcus@example.com", "Stanford University", formatTime(t3), "admin@stanford.edu", "archive@stanford.edu", "", "send"],
-      ["Sarah Jenkins", "sarah@example.com", "Freelance", "04:30 PM", "", "", "", "draft"] // example of relative HH:MM PM
+      ["Name", "Email", "Affiliation", "Date", "Technical Schedual Name", "Time", "CC", "BCC", "Sender", "Action", "S_Time"],
+      ["Devin Allen", "devin@example.com", "Acme Corporation", "2026-07-15", "Routine Maintenance", "10:00 AM", "manager@acme.com", "", "sender1@gmail.com", "send", formatTime(t1)],
+      ["Elena Rostova", "elena@example.com", "Apex Labs", "2026-07-16", "Database Upgrade", "02:30 PM", "", "", "sender2@gmail.com", "draft", formatTime(t2)],
+      ["Dr. Marcus Vance", "marcus@example.com", "Stanford University", "2026-07-17", "Server Deployment", "11:15 AM", "admin@stanford.edu", "archive@stanford.edu", "", "send", formatTime(t3)],
+      ["Sarah Jenkins", "sarah@example.com", "Freelance", "2026-07-18", "API Integration", "04:30 PM", "", "", "", "draft", "04:30 PM"]
     ];
 
     const worksheet = XLSX.utils.aoa_to_sheet(data);
@@ -2022,4 +2295,78 @@ function testSenderAccountConnection(id) {
     showToast(`Relay Connection Failed. Ensure local server script is running.`, "error");
     addLog(`[Test Fail] Connection to local relay server failed: ${err.message}`, "error");
   });
+}
+
+// -------------------------------------------------------------
+// GMAIL-STYLE COMPOSER HELPER FUNCTIONS
+// -------------------------------------------------------------
+
+// Insert text or tags at current cursor position inside contenteditable
+function insertTextAtCursor(text) {
+  const sel = window.getSelection();
+  const editor = document.getElementById("email-body-editor");
+  if (!editor) return;
+
+  if (sel.getRangeAt && sel.rangeCount) {
+    const range = sel.getRangeAt(0);
+    // Check if selection is actually inside the editor
+    if (editor.contains(range.commonAncestorContainer)) {
+      range.deleteContents();
+      const textNode = document.createTextNode(text);
+      range.insertNode(textNode);
+      
+      // Move caret after the inserted text
+      range.setStartAfter(textNode);
+      range.setEndAfter(textNode);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return;
+    }
+  }
+  
+  // Fallback: If not focused or cursor not in editor, append to body
+  editor.focus();
+  const range = document.createRange();
+  range.selectNodeContents(editor);
+  range.collapse(false);
+  const textNode = document.createTextNode(text);
+  range.insertNode(textNode);
+  range.setStartAfter(textNode);
+  range.setEndAfter(textNode);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+// Convert HTML rich content back to clean plain text for mailto/web links
+function htmlToPlainText(html) {
+  if (!html) return "";
+  
+  // Replace <br> tags with linebreaks
+  let text = html.replace(/<br\s*\/?>/gi, "\n");
+  
+  // Handle list items
+  text = text.replace(/<li[^>]*>/gi, " • ").replace(/<\/li>/gi, "\n");
+  
+  // Replace block closures with newlines
+  text = text.replace(/<\/div>/gi, "\n").replace(/<div>/gi, "");
+  text = text.replace(/<\/p>/gi, "\n").replace(/<p>/gi, "");
+  text = text.replace(/<\/h[1-6]>/gi, "\n\n");
+  
+  // Strip all HTML tags
+  text = text.replace(/<[^>]*>/g, "");
+  
+  // Decode HTML entities
+  const tempDoc = new DOMParser().parseFromString(text, "text/html");
+  return tempDoc.body.textContent || tempDoc.body.innerText || text;
+}
+
+// Sync the theme button icon based on active theme
+function updateThemeToggleIcon(theme) {
+  const btn = document.getElementById("theme-toggle-btn");
+  if (!btn) return;
+  if (theme === "dark") {
+    btn.innerHTML = `<i data-lucide="sun"></i>`;
+  } else {
+    btn.innerHTML = `<i data-lucide="moon"></i>`;
+  }
 }
