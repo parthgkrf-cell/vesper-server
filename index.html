@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vesper Mail Scheduler — Personal Email Campaign Manager</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Outfit:wght@300;400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+  <!-- Lucide Icons -->
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.344.0/dist/umd/lucide.min.js"></script>
+  <!-- SheetJS (XLSX Parser) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <!-- App Stylesheet -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo-icon">
+          <i data-lucide="send" class="glow-icon"></i>
+        </div>
+        <div class="brand-text">
+          <h1>Vesper</h1>
+          <span>Mail Scheduler</span>
+        </div>
+      </div>
+
+      <nav class="nav-menu">
+        <button class="nav-item active" data-tab="upload">
+          <i data-lucide="file-spreadsheet"></i>
+          <span>Import Excel</span>
+        </button>
+        <button class="nav-item" data-tab="composer">
+          <i data-lucide="pen-tool"></i>
+          <span>Compose Template</span>
+        </button>
+        <button class="nav-item" data-tab="queue">
+          <i data-lucide="clock"></i>
+          <span>Schedule & Queue</span>
+          <span class="badge badge-indigo hidden" id="queue-badge">0</span>
+        </button>
+        <button class="nav-item" data-tab="settings">
+          <i data-lucide="sliders"></i>
+          <span>Configuration</span>
+        </button>
+        <button class="nav-item" data-tab="help">
+          <i data-lucide="help-circle"></i>
+          <span>Guide</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="scheduler-status" id="scheduler-status-indicator">
+          <span class="status-dot dot-gray"></span>
+          <span class="status-text">Scheduler Stopped</span>
+        </div>
+        <button class="btn btn-primary btn-block" id="sidebar-toggle-scheduler">
+          <i data-lucide="play"></i>
+          <span>Start Scheduler</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="content-area">
+
+      <!-- HEADER bar -->
+      <header class="content-header">
+        <div class="header-title-area">
+          <h2 id="current-tab-title">Import Recipients</h2>
+          <p id="current-tab-subtitle">Upload your Excel template and preview recipient lists</p>
+        </div>
+        <div class="header-actions" style="display: flex; align-items: center; gap: 15px;">
+          <button id="theme-toggle-btn" class="btn btn-secondary" title="Toggle Light/Dark Mode" style="border-radius: 50%; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; padding: 0;">
+            <i data-lucide="sun"></i>
+          </button>
+          <div class="clock-display">
+            <i data-lucide="calendar"></i>
+            <span id="current-time-text">--/--/---- --:--:--</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- TAB: Upload Excel -->
+      <section class="tab-pane active" id="tab-upload">
+        <div class="grid-2-1">
+          <div class="card glass">
+            <div class="card-header">
+              <h3>Upload Excel / CSV File</h3>
+              <p>Import your mailing list. It must contain headers like: <strong>Name</strong>, <strong>Email</strong>, <strong>Affiliation</strong>, and <strong>Time</strong>.</p>
+            </div>
+            
+            <div class="upload-zone" id="excel-dropzone">
+              <input type="file" id="excel-file-input" accept=".xlsx, .xls, .csv" style="display: none;">
+              <i data-lucide="cloud-upload" class="upload-icon"></i>
+              <h4>Drag & drop your Excel file here</h4>
+              <p>or <span class="browse-link">browse files</span></p>
+              <span class="file-limits">Supports .xlsx, .xls, and .csv (Max 10MB)</span>
+            </div>
+
+            <!-- Parsed Data View -->
+            <div class="parsed-data-section hidden" id="parsed-data-section">
+              <div class="section-title-bar">
+                <h4>Imported Contacts (<span id="parsed-count">0</span>)</h4>
+                <button class="btn btn-secondary btn-sm" id="btn-clear-excel">
+                  <i data-lucide="trash-2"></i>
+                  <span>Clear List</span>
+                </button>
+              </div>
+              <div class="table-container">
+                <table class="data-table" id="excel-preview-table">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Name</th>
+                      <th>Email</th>
+                      <th>Affiliation</th>
+                      <th>Date</th>
+                      <th>Tech Schedule</th>
+                      <th>Time</th>
+                      <th>S_Time (Raw)</th>
+                      <th>Parsed Send Time</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <!-- Injected dynamically -->
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="sidebar-cards">
+            <!-- Template Guide Card -->
+            <div class="card glass accent-indigo">
+              <div class="card-header">
+                <div class="card-icon"><i data-lucide="info"></i></div>
+                <h3>Excel File Format</h3>
+              </div>
+              <div class="card-body">
+                <p>Ensure your file has these column headers on the first sheet:</p>
+                <ul class="guide-list" style="max-height: 250px; overflow-y: auto; padding-right: 5px;">
+                  <li><strong>Name</strong> — Recipient's name (e.g. <code>John Doe</code>)</li>
+                  <li><strong>Email</strong> — Recipient's address (e.g. <code>john@example.com</code>)</li>
+                  <li><strong>Affiliation</strong> — Company/Organization (e.g. <code>Google</code>)</li>
+                  <li><strong>Date</strong> — Custom date tag (e.g. <code>2026-07-15</code>)</li>
+                  <li><strong>Technical Schedual Name</strong> — Task name (e.g. <code>System Maintenance</code>)</li>
+                  <li><strong>Time</strong> — Custom time tag (e.g. <code>10:00 AM</code>)</li>
+                  <li><strong>CC</strong> — Carbon copy emails (comma-separated)</li>
+                  <li><strong>BCC</strong> — Blind carbon copy emails (comma-separated)</li>
+                  <li><strong>Sender</strong> — Relay email address (SMTP matching)</li>
+                  <li><strong>Action</strong> — <code>send</code> or <code>draft</code></li>
+                  <li><strong>S_Time</strong> — <strong>Mailing Scheduled Time</strong> (e.g. <code>2026-07-02 15:30:00</code>). Used to schedule dispatch but *never* sent inside email.</li>
+                </ul>
+                <button class="btn btn-indigo btn-block mt-15" id="btn-download-sample">
+                  <i data-lucide="download"></i>
+                  <span>Download Sample Excel</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Stats Overview Card -->
+            <div class="card glass">
+              <div class="card-header">
+                <h3>Import Summary</h3>
+              </div>
+              <div class="card-body">
+                <div class="stat-rows">
+                  <div class="stat-row">
+                    <span>Valid Recipients</span>
+                    <span class="value text-teal" id="stat-valid-count">0</span>
+                  </div>
+                  <div class="stat-row">
+                    <span>Invalid Rows</span>
+                    <span class="value text-coral" id="stat-invalid-count">0</span>
+                  </div>
+                  <div class="stat-row">
+                    <span>Earliest Schedule</span>
+                    <span class="value" id="stat-earliest-time">—</span>
+                  </div>
+                  <div class="stat-row">
+                    <span>Latest Schedule</span>
+                    <span class="value" id="stat-latest-time">—</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB: Email Composer -->
+      <section class="tab-pane" id="tab-composer">
+        <div class="grid-1-1">
+          <!-- Gmail-Style Composer Section -->
+          <div class="card glass flex-column gmail-compose-card" style="padding: 0; overflow: hidden; height: 100%; display: flex; flex-direction: column;">
+            <!-- Gmail Header -->
+            <div class="gmail-header">
+              <div class="gmail-header-title">
+                <i data-lucide="mail" style="width: 16px; height: 16px; color: var(--color-indigo);"></i>
+                <span>Gmail-Style Composer</span>
+              </div>
+              <div class="gmail-header-actions">
+                <span class="gmail-hdr-btn" title="Minimize"><i data-lucide="minus"></i></span>
+                <span class="gmail-hdr-btn" title="Expand"><i data-lucide="maximize-2"></i></span>
+                <span class="gmail-hdr-btn" id="btn-discard-gmail-header" title="Clear"><i data-lucide="x"></i></span>
+              </div>
+            </div>
+
+            <div class="gmail-fields">
+              <!-- From / Sender Account Selection -->
+              <div class="gmail-field-row">
+                <span class="gmail-field-label">From:</span>
+                <div class="gmail-field-input-wrapper">
+                  <select id="email-sender-template" class="gmail-select-control">
+                    <option value="">-- No Accounts Configured --</option>
+                  </select>
+                </div>
+                <div class="gmail-field-right-actions">
+                  <select id="email-action-template" class="gmail-select-control sm">
+                    <option value="send" selected>Send Email (SMTP)</option>
+                    <option value="draft">Save to Drafts (IMAP)</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- Subject Row -->
+              <div class="gmail-field-row">
+                <span class="gmail-field-label">Subject:</span>
+                <input type="text" id="email-subject-template" placeholder="Enter Subject Template..." class="gmail-input-control" value="Quick question regarding {Affiliation}">
+                <div class="gmail-field-ccbcc-toggles">
+                  <span id="toggle-cc-field" class="field-toggle-btn">Cc</span>
+                  <span id="toggle-bcc-field" class="field-toggle-btn">Bcc</span>
+                </div>
+              </div>
+
+              <!-- CC Row -->
+              <div class="gmail-field-row hidden" id="cc-field-row">
+                <span class="gmail-field-label">Cc:</span>
+                <input type="text" id="email-cc-template" placeholder="cc1@domain.com, cc2@domain.com" class="gmail-input-control">
+              </div>
+
+              <!-- BCC Row -->
+              <div class="gmail-field-row hidden" id="bcc-field-row">
+                <span class="gmail-field-label">Bcc:</span>
+                <input type="text" id="email-bcc-template" placeholder="bcc1@domain.com" class="gmail-input-control">
+              </div>
+            </div>
+
+            <!-- Contenteditable editor -->
+            <div class="gmail-body-container">
+              <div id="email-body-editor" contenteditable="true" class="gmail-editor" placeholder="Compose your email here..."></div>
+            </div>
+
+            <!-- Formatting Toolbar -->
+            <div class="gmail-toolbar hidden" id="gmail-formatting-toolbar">
+              <!-- Font Select -->
+              <select id="editor-font-family" class="toolbar-select" title="Font Style">
+                <option value="Arial" selected>Sans Serif</option>
+                <option value="'Plus Jakarta Sans'">Jakarta</option>
+                <option value="Georgia">Serif</option>
+                <option value="'Courier New'">Fixed Width</option>
+                <option value="Verdana">Verdana</option>
+              </select>
+
+              <!-- Size Select -->
+              <select id="editor-font-size" class="toolbar-select" title="Font Size">
+                <option value="2">Small</option>
+                <option value="3" selected>Normal</option>
+                <option value="5">Large</option>
+                <option value="7">Huge</option>
+              </select>
+
+              <div class="toolbar-divider"></div>
+
+              <!-- Formatting commands -->
+              <button type="button" class="toolbar-btn" data-command="bold" title="Bold (Ctrl+B)"><i data-lucide="bold"></i></button>
+              <button type="button" class="toolbar-btn" data-command="italic" title="Italic (Ctrl+I)"><i data-lucide="italic"></i></button>
+              <button type="button" class="toolbar-btn" data-command="underline" title="Underline (Ctrl+U)"><i data-lucide="underline"></i></button>
+              
+              <!-- Text Color Picker -->
+              <div class="color-picker-container">
+                <button type="button" class="toolbar-btn" id="btn-text-color" title="Text Color"><i data-lucide="baseline"></i></button>
+                <div class="color-picker-dropdown hidden" id="text-color-dropdown" style="width: 200px;">
+                  <div class="color-picker-section">
+                    <div class="color-section-title">Background Color</div>
+                    <div class="color-grid">
+                      <!-- Row 1: Grayscale & custom -->
+                      <span class="color-box" data-type="backcolor" data-color="#ffffff" style="background-color: #ffffff; border: 1px solid rgba(255,255,255,0.2);" title="White"></span>
+                      <span class="color-box" data-type="backcolor" data-color="#f3f4f6" style="background-color: #f3f4f6;" title="Light Grey"></span>
+                      <span class="color-box" data-type="backcolor" data-color="#9ca3af" style="background-color: #9ca3af;" title="Grey"></span>
+                      <span class="color-box" data-type="backcolor" data-color="#4b5563" style="background-color: #4b5563;" title="Dark Grey"></span>
+                      <span class="color-box" data-type="backcolor" data-color="#000000" style="background-color: #000000;" title="Black"></span>
+                      <span class="color-box" data-type="backcolor" data-color="#073763" style="background-color: rgb(7, 55, 99);" title="RGB(7, 55, 99)"></span>
+                      
+                      <!-- Row 2: Pastels -->
+                      <span class="color-box" data-type="backcolor" data-color="#f87171" style="background-color: #f87171;" title="Light Red"></span>
+                      <span class="color-box" data-type="backcolor" data-color="#fb923c" style="background-color: #fb923c;" title="Light Orange"></span>
+                      <span class="color-box" data-type="backcolor" data-color="#fde047" style="background-color: #fde047;" title="Light Yellow"></span>
+                      <span class="color-box" data-type="backcolor" data-color="#4ade80" style="background-color: #4ade80;" title="Light Green"></span>
+                      <span class="color-box" data-type="backcolor" data-color="#22d3ee" style="background-color: #22d3ee;" title="Light Cyan"></span>
+                      <span class="color-box" data-type="backcolor" data-color="#60a5fa" style="background-color: #60a5fa;" title="Light Blue"></span>
+
+                      <!-- Row 3: Colors -->
+                      <span class="color-box" data-type="backcolor" data-color="#ef4444" style="background-color: #ef4444;" title="Red"></span>
+                      <span class="color-box" data-type="backcolor" data-color="#f97316" style="background-color: #f97316;" title="Orange"></span>
+                      <span class="color-box" data-type="backcolor" data-color="#eab308" style="background-color: #eab308;" title="Yellow"></span>
+                      <span class="color-box" data-type="backcolor" data-color="#22c55e" style="background-color: #22c55e;" title="Green"></span>
+                      <span class="color-box" data-type="backcolor" data-color="#06b6d4" style="background-color: #06b6d4;" title="Cyan"></span>
+                      <span class="color-box" data-type="backcolor" data-color="#3b82f6" style="background-color: #3b82f6;" title="Blue"></span>
+                    </div>
+                  </div>
+                  <div class="color-picker-section">
+                    <div class="color-section-title">Text Color</div>
+                    <div class="color-grid">
+                      <!-- Row 1: Grayscale & custom -->
+                      <span class="color-box" data-type="forecolor" data-color="#ffffff" style="background-color: #ffffff; border: 1px solid rgba(255,255,255,0.2);" title="White"></span>
+                      <span class="color-box" data-type="forecolor" data-color="#e5e7eb" style="background-color: #e5e7eb;" title="Light Grey"></span>
+                      <span class="color-box" data-type="forecolor" data-color="#9ca3af" style="background-color: #9ca3af;" title="Grey"></span>
+                      <span class="color-box" data-type="forecolor" data-color="#374151" style="background-color: #374151;" title="Dark Grey"></span>
+                      <span class="color-box" data-type="forecolor" data-color="#000000" style="background-color: #000000;" title="Black"></span>
+                      <span class="color-box" data-type="forecolor" data-color="#073763" style="background-color: rgb(7, 55, 99);" title="RGB(7, 55, 99)"></span>
+                      
+                      <!-- Row 2: Colors -->
+                      <span class="color-box" data-type="forecolor" data-color="#ef4444" style="background-color: #ef4444;" title="Red"></span>
+                      <span class="color-box" data-type="forecolor" data-color="#f97316" style="background-color: #f97316;" title="Orange"></span>
+                      <span class="color-box" data-type="forecolor" data-color="#eab308" style="background-color: #eab308;" title="Yellow"></span>
+                      <span class="color-box" data-type="forecolor" data-color="#22c55e" style="background-color: #22c55e;" title="Green"></span>
+                      <span class="color-box" data-type="forecolor" data-color="#06b6d4" style="background-color: #06b6d4;" title="Cyan"></span>
+                      <span class="color-box" data-type="forecolor" data-color="#3b82f6" style="background-color: #3b82f6;" title="Blue"></span>
+
+                      <!-- Row 3: Dark Colors -->
+                      <span class="color-box" data-type="forecolor" data-color="#991b1b" style="background-color: #991b1b;" title="Dark Red"></span>
+                      <span class="color-box" data-type="forecolor" data-color="#9a3412" style="background-color: #9a3412;" title="Dark Orange"></span>
+                      <span class="color-box" data-type="forecolor" data-color="#854d0e" style="background-color: #854d0e;" title="Dark Yellow"></span>
+                      <span class="color-box" data-type="forecolor" data-color="#166534" style="background-color: #166534;" title="Dark Green"></span>
+                      <span class="color-box" data-type="forecolor" data-color="#155e75" style="background-color: #155e75;" title="Dark Cyan"></span>
+                      <span class="color-box" data-type="forecolor" data-color="#1e3a8a" style="background-color: #1e3a8a;" title="Dark Blue"></span>
+                    </div>
+                  </div>
+                  
+                  <!-- Custom Color Input Section -->
+                  <div class="custom-color-control" style="border-top: 1px solid var(--border-color); padding-top: 8px; margin-top: 4px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                    <span class="color-section-title" style="margin-bottom: 0;">Custom Color</span>
+                    <div style="display: flex; gap: 6px; align-items: center;">
+                      <select id="custom-color-type" style="background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); color: var(--text-primary); font-size: 11px; padding: 2px 4px; border-radius: 3px; outline: none; cursor: pointer;">
+                        <option value="forecolor" selected>Text</option>
+                        <option value="backcolor">Highlight</option>
+                      </select>
+                      <input type="color" id="custom-color-input" style="width: 28px; height: 20px; border: 1px solid var(--border-color); border-radius: 3px; cursor: pointer; padding: 0; background: none;">
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="toolbar-divider"></div>
+
+              <!-- Alignment -->
+              <button type="button" class="toolbar-btn" data-command="justifyLeft" title="Align Left"><i data-lucide="align-left"></i></button>
+              <button type="button" class="toolbar-btn" data-command="justifyCenter" title="Align Center"><i data-lucide="align-center"></i></button>
+              <button type="button" class="toolbar-btn" data-command="justifyRight" title="Align Right"><i data-lucide="align-right"></i></button>
+              
+              <div class="toolbar-divider"></div>
+
+              <!-- Lists -->
+              <button type="button" class="toolbar-btn" data-command="insertOrderedList" title="Numbered List"><i data-lucide="list-ordered"></i></button>
+              <button type="button" class="toolbar-btn" data-command="insertUnorderedList" title="Bulleted List"><i data-lucide="list"></i></button>
+              
+              <div class="toolbar-divider"></div>
+
+              <!-- Indentation -->
+              <button type="button" class="toolbar-btn" data-command="outdent" title="Decrease Indent"><i data-lucide="outdent"></i></button>
+              <button type="button" class="toolbar-btn" data-command="indent" title="Increase Indent"><i data-lucide="indent"></i></button>
+
+              <div class="toolbar-divider"></div>
+
+              <!-- Reset -->
+              <button type="button" class="toolbar-btn" data-command="removeFormat" title="Clear Formatting"><i data-lucide="trash-2"></i></button>
+            </div>
+
+            <!-- Footer Area -->
+            <div class="gmail-footer">
+              <div class="gmail-footer-left">
+                <button class="btn-gmail-send" id="btn-save-template-gmail">Save Template</button>
+                
+                <button type="button" class="gmail-footer-icon-btn" id="btn-toggle-formatting" title="Formatting Options">
+                  <i data-lucide="type"></i>
+                </button>
+
+                <button type="button" class="gmail-footer-icon-btn" id="btn-insert-link" title="Insert Link">
+                  <i data-lucide="link"></i>
+                </button>
+
+                <!-- Merge Tags Dropdown -->
+                <div class="gmail-merge-tags-dropdown-container">
+                  <button type="button" class="gmail-footer-icon-btn" id="btn-show-merge-tags" title="Insert Merge Tag">
+                    <i data-lucide="user-check"></i>
+                  </button>
+                  <div class="merge-tags-dropdown-menu hidden" id="gmail-merge-tags-menu">
+                    <div class="merge-tag-item" data-tag="{Name}"><i data-lucide="user" style="width: 12px; height: 12px; display: inline; margin-right: 6px;"></i> Name</div>
+                    <div class="merge-tag-item" data-tag="{Affiliation}"><i data-lucide="building" style="width: 12px; height: 12px; display: inline; margin-right: 6px;"></i> Affiliation</div>
+                    <div class="merge-tag-item" data-tag="{Date}"><i data-lucide="calendar" style="width: 12px; height: 12px; display: inline; margin-right: 6px;"></i> Date</div>
+                    <div class="merge-tag-item" data-tag="{Technical Schedual Name}"><i data-lucide="settings" style="width: 12px; height: 12px; display: inline; margin-right: 6px;"></i> Tech Schedule Name</div>
+                    <div class="merge-tag-item" data-tag="{tsname}"><i data-lucide="settings" style="width: 12px; height: 12px; display: inline; margin-right: 6px;"></i> tsname</div>
+                    <div class="merge-tag-item" data-tag="{Time}"><i data-lucide="clock" style="width: 12px; height: 12px; display: inline; margin-right: 6px;"></i> Time</div>
+                    <div class="merge-tag-item" data-tag="{Email}"><i data-lucide="mail" style="width: 12px; height: 12px; display: inline; margin-right: 6px;"></i> Email</div>
+                    <div class="merge-tag-item" data-tag="{CC}"><i data-lucide="users" style="width: 12px; height: 12px; display: inline; margin-right: 6px;"></i> CC</div>
+                    <div class="merge-tag-item" data-tag="{BCC}"><i data-lucide="users" style="width: 12px; height: 12px; display: inline; margin-right: 6px;"></i> BCC</div>
+                    <div class="merge-tag-item" data-tag="{Sender}"><i data-lucide="user-check" style="width: 12px; height: 12px; display: inline; margin-right: 6px;"></i> Sender</div>
+                    <div class="merge-tag-item" data-tag="{Action}"><i data-lucide="activity" style="width: 12px; height: 12px; display: inline; margin-right: 6px;"></i> Action</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="gmail-footer-right">
+                <span class="gmail-saved-status" id="gmail-save-status">Draft saved</span>
+                <button type="button" class="gmail-footer-icon-btn" id="btn-discard-gmail-body" title="Clear Draft">
+                  <i data-lucide="trash-2"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Live Preview Section -->
+          <div class="card glass accent-cyan flex-column">
+            <div class="card-header border-bottom">
+              <div class="preview-header-meta">
+                <h3>Personalized Live Preview</h3>
+                <p>See exactly how the email will look for each recipient</p>
+              </div>
+              <div class="preview-recipient-select">
+                <label for="preview-recipient-dropdown">Recipient:</label>
+                <select id="preview-recipient-dropdown" class="form-control sm-select">
+                  <option value="">-- No Recipients Loaded --</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Email Client Simulation Frame -->
+            <div class="email-mockup-frame">
+              <div class="email-mockup-header">
+                <div class="mockup-dot red"></div>
+                <div class="mockup-dot yellow"></div>
+                <div class="mockup-dot green"></div>
+                <div class="mockup-title">Vesper Mail Client View</div>
+              </div>
+              <div class="email-mockup-content">
+                <div class="email-meta-line">
+                  <span class="meta-label">From:</span>
+                  <span class="meta-val" id="preview-sender-display">Personal Sender &lt;your-smtp-email@domain.com&gt;</span>
+                </div>
+                <div class="email-meta-line">
+                  <span class="meta-label">To:</span>
+                  <span class="meta-val text-teal" id="preview-to-display">recipient@domain.com</span>
+                </div>
+                <div class="email-meta-line hidden" id="preview-cc-row">
+                  <span class="meta-label">Cc:</span>
+                  <span class="meta-val text-teal" id="preview-cc-display">cc@domain.com</span>
+                </div>
+                <div class="email-meta-line hidden" id="preview-bcc-row">
+                  <span class="meta-label">Bcc:</span>
+                  <span class="meta-val text-teal" id="preview-bcc-display">bcc@domain.com</span>
+                </div>
+                <div class="email-meta-line">
+                  <span class="meta-label">Subject:</span>
+                  <span class="meta-val text-bold" id="preview-subject-display">No Subject Template Defined</span>
+                </div>
+                <div class="email-meta-line border-bottom">
+                  <span class="meta-label">Schedule:</span>
+                  <span class="meta-val text-indigo" id="preview-time-display">Not scheduled yet</span>
+                </div>
+                <div class="email-body-pane" id="preview-body-display">
+                  Select a recipient and type a message to see the preview here.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB: Schedule & Queue -->
+      <section class="tab-pane" id="tab-queue">
+        <div class="queue-layout">
+          <!-- Left Column: Metrics & Controls -->
+          <div class="flex-column gap-20">
+            <div class="grid-2-2">
+              <div class="mini-stat-card">
+                <div class="stat-icon icon-blue"><i data-lucide="layers"></i></div>
+                <div class="stat-info">
+                  <span class="stat-lbl">Total Queue</span>
+                  <h4 id="queue-total-stat">0</h4>
+                </div>
+              </div>
+              <div class="mini-stat-card">
+                <div class="stat-icon icon-yellow"><i data-lucide="history"></i></div>
+                <div class="stat-info">
+                  <span class="stat-lbl">Pending</span>
+                  <h4 id="queue-pending-stat">0</h4>
+                </div>
+              </div>
+              <div class="mini-stat-card">
+                <div class="stat-icon icon-green"><i data-lucide="check-circle-2"></i></div>
+                <div class="stat-info">
+                  <span class="stat-lbl">Sent Success</span>
+                  <h4 id="queue-sent-stat">0</h4>
+                </div>
+              </div>
+              <div class="mini-stat-card">
+                <div class="stat-icon icon-red"><i data-lucide="alert-triangle"></i></div>
+                <div class="stat-info">
+                  <span class="stat-lbl">Failed</span>
+                  <h4 id="queue-failed-stat">0</h4>
+                </div>
+              </div>
+            </div>
+
+            <!-- Scheduler Controls Card -->
+            <div class="card glass">
+              <div class="card-header">
+                <h3>Scheduler Control Deck</h3>
+              </div>
+              <div class="card-body flex-row gap-10">
+                <button class="btn btn-success btn-grow" id="btn-start-scheduler-deck">
+                  <i data-lucide="play"></i>
+                  <span>Start Engine</span>
+                </button>
+                <button class="btn btn-danger btn-grow" id="btn-stop-scheduler-deck" disabled>
+                  <i data-lucide="square"></i>
+                  <span>Pause Engine</span>
+                </button>
+                <button class="btn btn-secondary" id="btn-reset-queue" title="Reset all statuses to Pending">
+                  <i data-lucide="refresh-cw"></i>
+                  <span>Reset All</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Real-time Console Log -->
+            <div class="card glass flex-grow flex-column overflow-hidden">
+              <div class="card-header py-10 border-bottom">
+                <div class="flex-space-between">
+                  <h3>Engine Log Terminal</h3>
+                  <button class="btn btn-text btn-sm" id="btn-clear-logs">Clear Logs</button>
+                </div>
+              </div>
+              <div class="console-body flex-grow" id="console-logs">
+                <div class="console-line system">[System] Vesper Scheduler loaded. Standing by...</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right Column: Queue Details Table -->
+          <div class="card glass flex-column overflow-hidden">
+            <div class="card-header">
+              <div class="flex-space-between">
+                <div>
+                  <h3>Scheduled Jobs Queue</h3>
+                  <p>Individual schedule entries and live processing status</p>
+                </div>
+                <div class="table-actions">
+                  <button class="btn btn-secondary btn-sm" id="btn-trigger-now-batch" title="Send all emails immediately regardless of scheduled time">
+                    <i data-lucide="zap"></i>
+                    <span>Send Selected Now</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div class="table-container flex-grow overflow-auto">
+              <table class="data-table" id="queue-details-table">
+                <thead>
+                  <tr>
+                    <th width="40"><input type="checkbox" id="select-all-queue-rows"></th>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Sender Account</th>
+                    <th>Action</th>
+                    <th>Target Time</th>
+                    <th>Remaining</th>
+                    <th>Status</th>
+                    <th>Ctrl</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td colspan="9" class="text-center text-muted">No emails loaded in the schedule queue yet. Import an Excel file first.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB: Settings / Configuration -->
+      <section class="tab-pane" id="tab-settings">
+        <div class="grid-2-1">
+          <!-- Method Selection Card -->
+          <div class="card glass">
+            <div class="card-header border-bottom">
+              <h3>Sending Mode Configuration</h3>
+              <p>Configure how Vesper connects to the outside world to send your emails.</p>
+            </div>
+            
+            <div class="settings-form">
+              <!-- Method Radio Options -->
+              <div class="sending-method-options">
+                <label class="method-card active">
+                  <input type="radio" name="sending-method" value="localserver_send" checked>
+                  <div class="method-info">
+                    <span class="method-title"><i data-lucide="server"></i> Backend Email Send (SMTP)</span>
+                    <span class="method-desc">Sends emails directly in the background using SMTP via the local helper server. No browser windows are opened.</span>
+                  </div>
+                </label>
+
+                <label class="method-card">
+                  <input type="radio" name="sending-method" value="localserver_draft">
+                  <div class="method-info">
+                    <span class="method-title"><i data-lucide="folder-plus"></i> Backend Email Draft (IMAP)</span>
+                    <span class="method-desc">Creates email drafts in the background in your email provider's Drafts folder using IMAP via the local helper server. No browser windows are opened.</span>
+                  </div>
+                </label>
+              </div>
+
+              <!-- Conditional Fields: Local Server -->
+              <div class="conditional-fields" id="fields-localserver">
+                <h4 class="settings-sec-title">Local Server Configuration</h4>
+                <p class="settings-tip">Start the helper script in the project directory (see instructions on the right). If port 3000 is occupied, it will automatically find the next available port (e.g., 3001) and display the correct URL to use.</p>
+                <div class="grid-2-1 mt-10">
+                  <div class="form-group">
+                    <label for="local-server-url">Helper Server URL</label>
+                    <div style="display: flex; gap: 8px;">
+                      <input type="url" id="local-server-url" value="http://localhost:3000/send" class="form-control" style="flex-grow: 1;">
+                      <button class="btn btn-secondary" id="btn-test-local-server" type="button" style="padding: 0 15px; font-size: 12px; height: 38px;">
+                        <i data-lucide="refresh-cw" style="width: 14px; height: 14px;"></i> Test
+                      </button>
+                    </div>
+                    <span id="local-server-status-badge" class="connection-status-badge status-unknown">Status: Unknown (Click Test)</span>
+                  </div>
+                  <div class="form-group">
+                    <label for="local-server-action">Server Action</label>
+                    <select id="local-server-action" class="form-control">
+                      <option value="send" selected>Send Email Immediately (SMTP)</option>
+                      <option value="draft">Save to Drafts Folder (IMAP)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <!-- SENDER ACCOUNTS SECTION -->
+                <div class="sender-accounts-section mt-20" style="margin-top: 25px; border-top: 1px dashed var(--border-color); padding-top: 20px;">
+                  <h4 class="settings-sec-title" style="margin-bottom: 5px;">Configure SMTP Sender Accounts</h4>
+                  <p class="settings-tip">Manage the Gmail or custom SMTP accounts you want to send emails from. For Gmail accounts, you <strong>must</strong> use a 16-digit Google App Password.</p>
+                  
+                  <div class="table-container mt-15" style="margin-top: 15px; border: 1px solid var(--border-color); border-radius: var(--radius-md); overflow: hidden;">
+                    <table class="data-table small-table" id="sender-accounts-table" style="width: 100%; border-collapse: collapse;">
+                      <thead style="background-color: var(--bg-tertiary);">
+                        <tr>
+                          <th style="padding: 8px 12px; font-size: 11px; text-align: left;">Label</th>
+                          <th style="padding: 8px 12px; font-size: 11px; text-align: left;">Email / User</th>
+                          <th style="padding: 8px 12px; font-size: 11px; text-align: left;">SMTP Host</th>
+                          <th style="padding: 8px 12px; font-size: 11px; text-align: left;">Default</th>
+                          <th style="padding: 8px 12px; font-size: 11px; text-align: center; width: 100px;">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td colspan="5" class="text-center text-muted" style="padding: 20px; font-size: 13px; text-align: center;">No sender accounts configured yet. Add one below.</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <!-- Add Sender Account Box -->
+                  <div class="add-account-box mt-20 p-15" style="margin-top: 20px; padding: 20px; background-color: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: var(--radius-md);">
+                    <h5 class="form-sec-title" style="font-family: var(--font-headers); font-size: 14px; font-weight: 600; margin-bottom: 15px; color: white; display: flex; align-items: center; gap: 8px;">
+                      <i data-lucide="plus-circle" style="width: 16px; height: 16px; color: var(--color-indigo);"></i> Add New SMTP / Google Account
+                    </h5>
+                    <div class="grid-2-2" style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                      <div class="form-group" style="margin-bottom: 0;">
+                        <label for="acc-label">Account Label</label>
+                        <input type="text" id="acc-label" placeholder="e.g. Personal Gmail, Work SMTP" class="form-control">
+                      </div>
+                      <div class="form-group" style="margin-bottom: 0;">
+                        <label for="acc-user">Email ID / Username</label>
+                        <input type="email" id="acc-user" placeholder="e.g. name@gmail.com" class="form-control">
+                      </div>
+                    </div>
+                    
+                    <div class="grid-2-2" style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                      <div class="form-group" style="margin-bottom: 0;">
+                        <label for="acc-pass">Google App Password (16-Digit) / SMTP Password</label>
+                        <input type="password" id="acc-pass" placeholder="e.g. abcd efgh ijkl mnop" class="form-control">
+                        <span class="password-guide-tip" style="font-size: 11px; color: var(--text-muted); display: block; margin-top: 4px; line-height: 1.3;">
+                          For Gmail, enable 2-Step Verification, then go to Google Account Security to create a 16-digit App Password.
+                        </span>
+                      </div>
+                      <div class="form-group" style="margin-bottom: 0;">
+                        <label for="acc-host">SMTP Host</label>
+                        <input type="text" id="acc-host" placeholder="smtp.gmail.com" value="smtp.gmail.com" class="form-control">
+                      </div>
+                    </div>
+
+                    <div class="grid-2-1" style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                      <div class="form-group" style="margin-bottom: 0;">
+                        <label for="acc-port">SMTP Port</label>
+                        <input type="number" id="acc-port" placeholder="465" value="465" class="form-control">
+                      </div>
+                      <div class="form-group" style="margin-bottom: 0;">
+                        <label for="acc-secure">Encryption / TLS</label>
+                        <select id="acc-secure" class="form-control">
+                          <option value="ssl" selected>SSL / TLS (Port 465)</option>
+                          <option value="tls">STARTTLS (Port 587)</option>
+                          <option value="none">None (Port 25 / 2525)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div style="display: flex; justify-content: flex-end; margin-top: 15px;">
+                      <button class="btn btn-indigo" id="btn-add-sender-account" type="button" style="padding: 8px 16px; font-size: 13px;">
+                        <i data-lucide="plus" style="width: 14px; height: 14px;"></i> Add Account
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Global General Fields -->
+              <div class="global-settings-divider border-top"></div>
+              <div class="form-group">
+                <label for="global-test-email">Test Configuration</label>
+                <div class="input-group">
+                  <input type="email" id="global-test-email" placeholder="test-recipient@example.com" class="form-control">
+                  <button class="btn btn-indigo" id="btn-send-test-email">
+                    <i data-lucide="send"></i>
+                    <span>Send Test Email</span>
+                  </button>
+                </div>
+                <span class="field-hint">Sends a quick check email to verify SMTP / API settings.</span>
+              </div>
+
+              <!-- Maintenance / Reset Actions -->
+              <div class="form-group mt-20" style="margin-top: 25px; border-top: 1px solid var(--border-color); padding-top: 20px;">
+                <label style="color: var(--color-rose);">Maintenance Actions</label>
+                <p class="settings-tip" style="margin-bottom: 10px;">Clear all configurations, recipient lists, templates, and SMTP credentials. This resets the application to a clean slate.</p>
+                <div>
+                  <button class="btn btn-danger" id="btn-reset-application" type="button" style="padding: 8px 16px; font-size: 13px;">
+                    <i data-lucide="trash-2" style="width: 14px; height: 14px;"></i> Reset Entire Application
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Local Server Helper Script Snippets -->
+          <div class="sidebar-cards">
+            <div class="card glass">
+              <div class="card-header">
+                <h3>Local Server Start Guide</h3>
+                <p>Run the unified Vesper Mail Scheduler SMTP relay and UI server locally. It serves the frontend dashboard and dispatches emails via SMTP/IMAP in the background.</p>
+              </div>
+              <div class="card-body">
+                <div class="code-tabs">
+                  <button class="code-tab-btn active" data-lang="python">Python Server (Recommended)</button>
+                  <button class="code-tab-btn" data-lang="node">Node.js Server</button>
+                </div>
+
+                <div class="code-content-wrapper mt-10">
+                  <div class="code-snippet-box" id="code-snippet-python">
+                    <div class="snippet-header">
+                      <span>server.py</span>
+                      <button class="btn-copy-code" data-target="python-code-content"><i data-lucide="copy"></i> Copy</button>
+                    </div>
+                    <pre><code id="python-code-content">python server.py [port]</code></pre>
+                    <span class="code-comment">Launches the local SMTP/IMAP server and Web UI. Open http://localhost:3000 (or the specified port) to access Vesper.</span>
+                  </div>
+
+                  <div class="code-snippet-box hidden" id="code-snippet-node">
+                    <div class="snippet-header">
+                      <span>server.js</span>
+                      <button class="btn-copy-code" data-target="node-code-content"><i data-lucide="copy"></i> Copy</button>
+                    </div>
+                    <pre><code id="node-code-content">npm install express nodemailer cors imapflow
+node server.js [port]</code></pre>
+                    <span class="code-comment">Alternative server script written in Node.js. Serves standard SMTP and IMAP drafting helper functionality.</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB: Help Guide -->
+      <section class="tab-pane" id="tab-help">
+        <div class="card glass help-container">
+          <div class="help-grid">
+            <div class="help-section">
+              <h2><i data-lucide="rocket"></i> Getting Started in 3 Steps</h2>
+              <ol class="help-steps">
+                <li>
+                  <strong>Import Recipients:</strong> 
+                  Prepare an Excel or CSV file. Ensure it contains the headers <code>Name</code>, <code>Email</code>, <code>Affiliation</code>, and <code>Time</code>. Drag it into the <strong>Import Excel</strong> workspace.
+                </li>
+                <li>
+                  <strong>Compose Your Template:</strong>
+                  Go to <strong>Compose Template</strong> and draft your message. Insert merge tags like <code>{Name}</code> or <code>{Affiliation}</code> to personalize the content. Look at the <strong>Personalized Live Preview</strong> on the right to make sure it looks perfect.
+                </li>
+                <li>
+                  <strong>Configure & Start:</strong>
+                  Select your sending method in <strong>Configuration</strong> (SMTP to send immediately, or IMAP to save drafts), configure your SMTP sender accounts, and click <strong>Start Scheduler</strong> in the sidebar.
+                </li>
+              </ol>
+            </div>
+
+            <div class="help-section">
+              <h2><i data-lucide="settings"></i> Understanding Sending Modes</h2>
+              <div class="mode-comparison">
+                <div class="comparison-item">
+                  <div class="item-title"><i data-lucide="server"></i> Backend Email Send (SMTP)</div>
+                  <p>Emails are dispatched automatically in the background using the standard SMTP protocol via the local helper server. It connects to your configured email accounts (e.g., Gmail App Passwords or custom company relays) and handles delivery completely in the background without opening browser windows.</p>
+                </div>
+                <div class="comparison-item">
+                  <div class="item-title"><i data-lucide="folder-plus"></i> Backend Email Draft (IMAP)</div>
+                  <p>Instead of sending emails immediately, this mode connects to your email account's IMAP server and saves the fully customized emails directly into your Drafts folder. This lets you inspect them manually in your mail app before dispatching.</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="help-section full-width border-top pt-20">
+              <h2><i data-lucide="help-circle"></i> Frequently Asked Questions</h2>
+              <div class="faq-grid">
+                <div class="faq-card">
+                  <h4>Do I need to keep the tab open?</h4>
+                  <p>Yes. Since the scheduler runs directly in your browser, you must keep this browser tab open to allow the background timer to process your active scheduled queue.</p>
+                </div>
+                <div class="faq-card">
+                  <h4>What happens if the scheduled time has already passed when I import?</h4>
+                  <p>The scheduler will treat it as "due immediately" and trigger/send it within the first few seconds of starting the scheduler engine.</p>
+                </div>
+                <div class="faq-card">
+                  <h4>Can I edit individual rows after importing?</h4>
+                  <p>You can manage the active status of scheduled items in the <strong>Schedule & Queue</strong> tab, check/uncheck items, trigger specific items immediately, or reset them.</p>
+                </div>
+                <div class="faq-card">
+                  <h4>Are my passwords and API keys secure?</h4>
+                  <p>Absolutely. All configuration, keys, and SMTP credentials are stored locally in your browser's <code>localStorage</code>. No data is sent to Vesper or any external servers except the email service providers you configure.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Notification Toast Container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- Main Application Logic -->
+  <script src="app.js"></script>
+</body>
+</html>
