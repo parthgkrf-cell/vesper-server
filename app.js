@@ -20,7 +20,8 @@ let state = {
     senderAccounts: [] // array of { id, label, user, pass, host, port, secure, isDefault }
   },
   schedulerActive: false,
-  logs: []
+  logs: [],
+  headers: {} // Map of column letters to header labels
 };
 
 // Global Timer Reference
@@ -74,6 +75,10 @@ async function loadConfigFromServer() {
             parsedTime: r.parsedTime ? new Date(r.parsedTime) : null
           }));
         }
+        if (config.headers) {
+          state.headers = config.headers;
+          localStorage.setItem("vesper_headers", JSON.stringify(state.headers));
+        }
         // Force upgrade/migration for settings method
         if (state.settings.method !== "localserver_send" && state.settings.method !== "localserver_draft") {
           state.settings.method = state.settings.localAction === "draft" ? "localserver_draft" : "localserver_send";
@@ -101,7 +106,8 @@ async function saveConfigToServer() {
         body: JSON.stringify({
           settings: state.settings,
           template: state.template,
-          recipients: state.recipients
+          recipients: state.recipients,
+          headers: state.headers
         })
       });
     }
@@ -147,6 +153,15 @@ function loadStateFromCache() {
       console.error("Error loading cached recipients:", e);
     }
   }
+
+  const cachedHeaders = localStorage.getItem("vesper_headers");
+  if (cachedHeaders) {
+    try {
+      state.headers = JSON.parse(cachedHeaders);
+    } catch (e) {
+      console.error("Error loading cached headers:", e);
+    }
+  }
 }
 
 // Save Settings and Template to Cache
@@ -162,6 +177,7 @@ function saveTemplateToCache() {
 
 function saveRecipientsToCache() {
   localStorage.setItem("vesper_recipients", JSON.stringify(state.recipients));
+  localStorage.setItem("vesper_headers", JSON.stringify(state.headers));
   saveConfigToServer();
 }
 
@@ -219,6 +235,35 @@ function initializeUI() {
     updateSummaryStats();
     populateRecipientDropdown();
     renderQueueTable();
+
+    // Restore dynamic column headers and merge tags menu from cache
+    if (state.headers && Object.keys(state.headers).length > 0) {
+      const colLetters = Object.keys(state.headers);
+      updateMergeTagsMenu(colLetters, state.headers);
+      
+      const getColByHeader = (alts) => {
+        return colLetters.find(l => {
+          const val = String(state.headers[l]).trim().toLowerCase();
+          return alts.some(alt => val === alt.toLowerCase() || val.includes(alt.toLowerCase()));
+        });
+      };
+      
+      const nameCol = getColByHeader(["Name", "First Name", "Recipient Name", "Full Name", "Contact Name"]);
+      const emailCol = getColByHeader(["Email", "Email Address", "Mail", "EmailID"]);
+      const affCol = getColByHeader(["Affiliation", "Company", "Organization", "Aff"]);
+      const dateCol = getColByHeader(["Date", "Mail Date", "Scheduled Date"]);
+      const techCol = getColByHeader(["Session", "session", "Technical Schedual Name", "Technical Schedule Name", "Tech Schedule", "Tech Schedual", "Schedule Name", "tsname"]);
+      const timeCol = getColByHeader(["Time", "Event Time", "Time Tag"]);
+      
+      updateTableHeadersWithLetters({
+        name: nameCol,
+        email: emailCol,
+        aff: affCol,
+        date: dateCol,
+        session: techCol,
+        time: timeCol
+      });
+    }
   }
 }
 
@@ -1049,7 +1094,7 @@ function handleExcelFile(file) {
       const sheetName = workbook.SheetNames[0];
       const sheet = workbook.Sheets[sheetName];
       
-      const rows = XLSX.utils.sheet_to_json(sheet, { raw: false, defval: "" }); // raw: false gets formatted strings exactly as shown in Excel
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: "A", raw: false, defval: "" });
       
       if (rows.length === 0) {
         throw new Error("The selected Excel sheet contains no rows of data.");
@@ -1076,54 +1121,87 @@ function handleExcelFile(file) {
 // Clean and map imported columns to standardized format
 function processImportedRows(rows) {
   state.recipients = [];
+  state.headers = {};
 
-  // Search case-insensitively for expected headers
-  const getHeaderKey = (row, alternatives) => {
-    const keys = Object.keys(row);
+  // Find the header row (the first row containing a field like 'email' or 'mail')
+  let headerRowIndex = 0;
+  for (let i = 0; i < Math.min(rows.length, 10); i++) {
+    const values = Object.values(rows[i]).map(v => String(v).toLowerCase());
+    if (values.some(v => v.includes("email") || v.includes("mail"))) {
+      headerRowIndex = i;
+      break;
+    }
+  }
+
+  const headerRow = rows[headerRowIndex];
+  
+  // Extract all valid column letter keys
+  const colLetters = Object.keys(headerRow).filter(k => /^[A-Z]+$/i.test(k));
+  
+  // Save to state.headers
+  colLetters.forEach(col => {
+    state.headers[col] = String(headerRow[col]).trim();
+  });
+
+  const getColumnLetter = (headerRow, alternatives) => {
     for (const alt of alternatives) {
-      const match = keys.find(k => k.trim().toLowerCase() === alt.toLowerCase());
+      const match = Object.keys(headerRow).find(key => {
+        const val = String(headerRow[key]).trim().toLowerCase();
+        return val === alt.toLowerCase();
+      });
+      if (match) return match;
+    }
+    // Fallback: contains match
+    for (const alt of alternatives) {
+      const match = Object.keys(headerRow).find(key => {
+        const val = String(headerRow[key]).trim().toLowerCase();
+        return val.includes(alt.toLowerCase());
+      });
       if (match) return match;
     }
     return null;
   };
 
+  const nameCol = getColumnLetter(headerRow, ["Name", "First Name", "Recipient Name", "Full Name", "Contact Name"]);
+  const emailCol = getColumnLetter(headerRow, ["Email", "Email Address", "Mail", "EmailID"]);
+  const affCol = getColumnLetter(headerRow, ["Affiliation", "Company", "Organization", "Aff"]);
+  const dateCol = getColumnLetter(headerRow, ["Date", "Mail Date", "Scheduled Date"]);
+  const techSchedCol = getColumnLetter(headerRow, ["Session", "session", "Technical Schedual Name", "Technical Schedule Name", "Tech Schedule", "Tech Schedual", "Schedule Name", "tsname"]);
+  const timeCol = getColumnLetter(headerRow, ["Time", "Event Time", "Time Tag"]);
+  const ccCol = getColumnLetter(headerRow, ["CC", "Cc", "Cc Email", "Carbon Copy"]);
+  const bccCol = getColumnLetter(headerRow, ["BCC", "Bcc", "Bcc Email", "Blind Carbon Copy"]);
+  const senderCol = getColumnLetter(headerRow, ["Sender", "Sender Email", "From", "Send From"]);
+  const actionCol = getColumnLetter(headerRow, ["Action", "Type", "Method", "Mode", "Scheduling Action"]);
+  const sTimeCol = getColumnLetter(headerRow, ["S_Time", "S-Time", "STime", "S Time", "Schedule Time", "Send Time", "Schedule"]);
+
   let rowCounter = 0;
   let invalidCounter = 0;
 
-  rows.forEach((row, index) => {
+  // Process data rows
+  for (let index = headerRowIndex + 1; index < rows.length; index++) {
+    const row = rows[index];
+    
     const getStringValue = (val) => {
       if (val === undefined || val === null) return "";
       return String(val).trim();
     };
 
-    const nameKey = getHeaderKey(row, ["Name", "First Name", "Recipient Name", "Full Name", "Contact Name"]);
-    const emailKey = getHeaderKey(row, ["Email", "Email Address", "Mail", "EmailID"]);
-    const affKey = getHeaderKey(row, ["Affiliation", "Company", "Organization", "Aff"]);
-    const dateKey = getHeaderKey(row, ["Date", "Mail Date", "Scheduled Date"]);
-    const techSchedKey = getHeaderKey(row, ["Technical Schedual Name", "Technical Schedule Name", "Tech Schedule", "Tech Schedual", "Schedule Name", "tsname"]);
-    const timeKey = getHeaderKey(row, ["Time", "Event Time", "Time Tag"]);
-    const ccKey = getHeaderKey(row, ["CC", "Cc", "Cc Email", "Carbon Copy"]);
-    const bccKey = getHeaderKey(row, ["BCC", "Bcc", "Bcc Email", "Blind Carbon Copy"]);
-    const senderKey = getHeaderKey(row, ["Sender", "Sender Email", "From", "Send From"]);
-    const actionKey = getHeaderKey(row, ["Action", "Type", "Method", "Mode", "Scheduling Action"]);
-    const sTimeKey = getHeaderKey(row, ["S_Time", "S-Time", "STime", "S Time", "Schedule Time", "Send Time", "Schedule"]);
-
-    const name = nameKey ? getStringValue(row[nameKey]) : "";
-    const email = emailKey ? getStringValue(row[emailKey]) : "";
-    const affiliation = affKey ? getStringValue(row[affKey]) : "Independent";
-    const date = dateKey ? getStringValue(row[dateKey]) : "";
-    const techScheduleName = techSchedKey ? getStringValue(row[techSchedKey]) : "";
-    const time = timeKey ? getStringValue(row[timeKey]) : "";
-    const cc = ccKey ? getStringValue(row[ccKey]) : "";
-    const bcc = bccKey ? getStringValue(row[bccKey]) : "";
-    const senderEmailStr = senderKey ? String(row[senderKey]).trim().toLowerCase() : "";
-    const actionStr = actionKey ? String(row[actionKey]).trim().toLowerCase() : "";
-    const rawSTime = sTimeKey ? row[sTimeKey] : "";
+    const name = nameCol ? getStringValue(row[nameCol]) : "";
+    const email = emailCol ? getStringValue(row[emailCol]) : "";
+    const affiliation = affCol ? getStringValue(row[affCol]) : "Independent";
+    const date = dateCol ? getStringValue(row[dateCol]) : "";
+    const techScheduleName = techSchedCol ? getStringValue(row[techSchedCol]) : "";
+    const time = timeCol ? getStringValue(row[timeCol]) : "";
+    const cc = ccCol ? getStringValue(row[ccCol]) : "";
+    const bcc = bccCol ? getStringValue(row[bccCol]) : "";
+    const senderEmailStr = senderCol ? String(row[senderCol]).trim().toLowerCase() : "";
+    const actionStr = actionCol ? String(row[actionCol]).trim().toLowerCase() : "";
+    const rawSTime = sTimeCol ? row[sTimeCol] : "";
 
     // Require Name and Email
     if (!name || !email) {
       invalidCounter++;
-      return;
+      continue;
     }
 
     const parsedTime = parseScheduleTime(rawSTime);
@@ -1151,6 +1229,12 @@ function processImportedRows(rows) {
       action = state.template.action || "send";
     }
 
+    // Capture ALL raw column values by letter
+    const colValues = {};
+    colLetters.forEach(col => {
+      colValues[col] = getStringValue(row[col]);
+    });
+
     state.recipients.push({
       id: `recipient-${rowCounter}-${Date.now()}`,
       name: name,
@@ -1158,17 +1242,19 @@ function processImportedRows(rows) {
       affiliation: affiliation,
       date: date,
       techScheduleName: techScheduleName,
+      session: techScheduleName,
       time: time,
       rawTime: String(rawSTime || "Now"),
-      parsedTime: parsedTime || new Date(), // Defaults to immediate sending if unparseable
+      parsedTime: parsedTime || new Date(),
       senderAccountId: senderAccountId,
       sender: senderEmailStr || (matchedAcc ? matchedAcc.user : ""),
       action: action,
       cc: cc || state.template.cc || "",
       bcc: bcc || state.template.bcc || "",
-      status: "Pending"
+      status: "Pending",
+      colValues: colValues
     });
-  });
+  }
 
   saveRecipientsToCache();
   
@@ -1180,6 +1266,17 @@ function processImportedRows(rows) {
   updateSummaryStats();
   populateRecipientDropdown();
   renderQueueTable();
+
+  // Re-build column headers and merge tags dropdown dynamically
+  updateMergeTagsMenu(colLetters, headerRow);
+  updateTableHeadersWithLetters({
+    name: nameCol,
+    email: emailCol,
+    aff: affCol,
+    date: dateCol,
+    session: techSchedCol,
+    time: timeCol
+  });
   
   addLog(`Successfully processed ${state.recipients.length} rows. Discarded ${invalidCounter} incomplete rows.`, "system");
 }
@@ -1480,12 +1577,20 @@ function renderTemplate(templateStr, rec) {
   replaceTag("{Technical Schedual Name}", rec.techScheduleName);
   replaceTag("{Technical Schedule Name}", rec.techScheduleName);
   replaceTag("{tsname}", rec.techScheduleName);
+  replaceTag("{Session}", rec.techScheduleName);
+  replaceTag("{session}", rec.techScheduleName);
   replaceTag("{Time}", rec.time);
   replaceTag("{Email}", rec.email);
   replaceTag("{CC}", rec.cc);
   replaceTag("{BCC}", rec.bcc);
   replaceTag("{Sender}", rec.sender);
   replaceTag("{Action}", rec.action);
+
+  if (rec.colValues) {
+    Object.keys(rec.colValues).forEach(colLetter => {
+      replaceTag(`{${colLetter}}`, rec.colValues[colLetter]);
+    });
+  }
 
   return text;
 }
@@ -2175,4 +2280,64 @@ function updateThemeToggleIcon(theme) {
   } else {
     btn.innerHTML = `<i data-lucide="moon"></i>`;
   }
+}
+
+// Dynamic Column Mapping Helpers
+function updateTableHeadersWithLetters(mappings) {
+  const table = document.getElementById("excel-preview-table");
+  if (!table) return;
+  const headers = table.querySelectorAll("thead th");
+  if (headers.length < 9) return;
+  
+  headers[1].innerHTML = `Name ${mappings.name ? `<span class="badge badge-indigo" style="margin-left:5px;">Col ${mappings.name}</span>` : ""}`;
+  headers[2].innerHTML = `Email ${mappings.email ? `<span class="badge badge-indigo" style="margin-left:5px;">Col ${mappings.email}</span>` : ""}`;
+  headers[3].innerHTML = `Affiliation ${mappings.aff ? `<span class="badge badge-outline-gray" style="margin-left:5px;">Col ${mappings.aff}</span>` : ""}`;
+  headers[4].innerHTML = `Date ${mappings.date ? `<span class="badge badge-outline-gray" style="margin-left:5px;">Col ${mappings.date}</span>` : ""}`;
+  headers[5].innerHTML = `Session / Tech Schedule ${mappings.session ? `<span class="badge badge-outline-yellow" style="margin-left:5px;">Col ${mappings.session}</span>` : ""}`;
+  headers[6].innerHTML = `Time ${mappings.time ? `<span class="badge badge-outline-gray" style="margin-left:5px;">Col ${mappings.time}</span>` : ""}`;
+}
+
+function updateMergeTagsMenu(columnKeys, headerRow) {
+  const menu = document.getElementById("gmail-merge-tags-menu");
+  if (!menu) return;
+  
+  if (!menu.dataset.originalHtml) {
+    menu.dataset.originalHtml = menu.innerHTML;
+  }
+  
+  let newHtml = menu.dataset.originalHtml;
+  newHtml += `<div class="merge-tag-divider" style="height: 1px; background: var(--border-color); margin: 6px 0;"></div>`;
+  newHtml += `<div style="padding: 6px 12px; font-size: 10px; font-weight: bold; color: var(--text-muted); text-transform: uppercase;">Excel Columns</div>`;
+  
+  columnKeys.forEach(col => {
+    const colName = headerRow[col] ? String(headerRow[col]).trim() : `Column ${col}`;
+    newHtml += `
+      <div class="merge-tag-item" data-tag="{${col}}">
+        <i data-lucide="table" style="width: 12px; height: 12px; display: inline-block; vertical-align: middle; margin-right: 6px;"></i>
+        Col {${col}} - ${escapeHtml(colName)}
+      </div>
+    `;
+  });
+  
+  menu.innerHTML = newHtml;
+  
+  // Re-bind click handlers
+  const bodyEditor = document.getElementById("email-body-editor");
+  document.querySelectorAll(".merge-tag-item").forEach(item => {
+    const newItem = item.cloneNode(true);
+    item.replaceWith(newItem);
+    
+    newItem.addEventListener("click", () => {
+      const tag = newItem.getAttribute("data-tag");
+      if (bodyEditor) {
+        bodyEditor.focus();
+        insertTextAtCursor(tag);
+        state.template.body = bodyEditor.innerHTML;
+        saveTemplateToCache();
+        updateLivePreview();
+      }
+    });
+  });
+  
+  lucide.createIcons();
 }
