@@ -1564,11 +1564,27 @@ function renderTemplate(templateStr, rec) {
   if (!templateStr) return "";
   if (!rec) return templateStr;
   
+  console.log("--- renderTemplate Start ---");
+  console.log("Original template:", templateStr);
+  console.log("Recipient data:", {
+    name: rec.name,
+    email: rec.email,
+    affiliation: rec.affiliation,
+    date: rec.date,
+    techScheduleName: rec.techScheduleName,
+    time: rec.time,
+    colValues: rec.colValues
+  });
+  
   let text = templateStr;
   const replaceTag = (tag, val) => {
     const escapedTag = tag.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
     const regex = new RegExp(escapedTag, 'gi');
+    const oldText = text;
     text = text.replace(regex, val || "");
+    if (oldText !== text) {
+      console.log(`Replaced '${tag}' with '${val}'`);
+    }
   };
 
   replaceTag("{Name}", rec.name);
@@ -1592,6 +1608,8 @@ function renderTemplate(templateStr, rec) {
     });
   }
 
+  console.log("Rendered text output:", text);
+  console.log("--- renderTemplate End ---");
   return text;
 }
 
