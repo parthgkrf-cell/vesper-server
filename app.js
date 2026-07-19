@@ -5,6 +5,13 @@
 // State Object
 let state = {
   recipients: [],
+  stagedImportFiles: [],
+  queueFilters: {
+    template: "all",
+    file: "all",
+    status: "all",
+    search: ""
+  },
   template: {
     subject: "Quick question regarding {Affiliation}",
     cc: "",
@@ -20,6 +27,7 @@ let state = {
     senderAccounts: [] // array of { id, label, user, pass, host, port, secure, isDefault }
   },
   schedulerActive: false,
+  previewLayout: "single",
   logs: [],
   headers: {} // Map of column letters to header labels
 };
@@ -29,9 +37,8 @@ let schedulerInterval = null;
 
 // Initialize Application on Page Load
 document.addEventListener("DOMContentLoaded", async () => {
-  // Load cached theme and apply it immediately
-  const cachedTheme = localStorage.getItem("vesper_theme") || "dark";
-  document.documentElement.setAttribute("data-theme", cachedTheme);
+  // Enforce strict light theme
+  document.documentElement.setAttribute("data-theme", "light");
   
   loadStateFromCache();
   
@@ -46,8 +53,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupEventListeners();
   startClock();
   
-  // Sync the theme button icon
-  updateThemeToggleIcon(cachedTheme);
+  // If scheduler was active on server, reflect in UI and start polling
+  if (state.settings && state.settings.schedulerActive) {
+    state.schedulerActive = true;
+    updateSchedulerUIState();
+    startPollingState();
+  }
+  
   lucide.createIcons();
   
   addLog("System initialized. Welcome to Vesper Mail Scheduler.", "system");
@@ -65,7 +77,10 @@ async function loadConfigFromServer() {
           // Ensure URL is updated to current origin if served from server
           state.settings.localUrl = window.location.origin + "/send";
         }
-        if (config.template) {
+        if (config.templates) {
+          state.templates = config.templates;
+          state.activeTemplateId = config.activeTemplateId || state.templates[0].id;
+        } else if (config.template) {
           state.template = { ...state.template, ...config.template };
         }
         if (config.recipients) {
@@ -85,6 +100,10 @@ async function loadConfigFromServer() {
         }
         // Cache to localStorage
         localStorage.setItem("vesper_settings", JSON.stringify(state.settings));
+        if (state.templates) {
+          localStorage.setItem("vesper_templates", JSON.stringify(state.templates));
+          localStorage.setItem("vesper_active_template_id", state.activeTemplateId);
+        }
         localStorage.setItem("vesper_template", JSON.stringify(state.template));
         localStorage.setItem("vesper_recipients", JSON.stringify(state.recipients));
       }
@@ -106,6 +125,8 @@ async function saveConfigToServer() {
         body: JSON.stringify({
           settings: state.settings,
           template: state.template,
+          templates: state.templates,
+          activeTemplateId: state.activeTemplateId,
           recipients: state.recipients,
           headers: state.headers
         })
@@ -131,14 +152,41 @@ function loadStateFromCache() {
     }
   }
 
-  const cachedTemplate = localStorage.getItem("vesper_template");
-  if (cachedTemplate) {
+  const cachedTemplates = localStorage.getItem("vesper_templates");
+  const cachedActiveId = localStorage.getItem("vesper_active_template_id");
+  if (cachedTemplates) {
     try {
-      state.template = { ...state.template, ...JSON.parse(cachedTemplate) };
+      state.templates = JSON.parse(cachedTemplates);
+      state.activeTemplateId = cachedActiveId || state.templates[0].id;
     } catch (e) {
-      console.error("Error loading cached template:", e);
+      console.error("Error loading cached templates:", e);
     }
   }
+
+  // Migrate if upgrading from older single template version
+  if (!state.templates || state.templates.length === 0) {
+    const cachedTemplate = localStorage.getItem("vesper_template");
+    let oldTemplate = null;
+    if (cachedTemplate) {
+      try { oldTemplate = JSON.parse(cachedTemplate); } catch (e) {}
+    }
+    state.templates = [
+      {
+        id: "template-default",
+        name: "Default Template",
+        subject: oldTemplate?.subject || "Quick question regarding {Affiliation}",
+        cc: oldTemplate?.cc || "",
+        bcc: oldTemplate?.bcc || "",
+        body: oldTemplate?.body || "Dear {Name},\n\nI hope this email finds you well at {Affiliation}.\n\nThis is a scheduled follow-up email custom tailored for you. We will send this to your email {Email} at your scheduled slot: {Time}.\n\nBest regards,\nYour Personal Scheduler",
+        senderAccountId: oldTemplate?.senderAccountId || "",
+        action: oldTemplate?.action || "send"
+      }
+    ];
+    state.activeTemplateId = "template-default";
+  }
+
+  // Set the active template reference
+  state.template = state.templates.find(t => t.id === state.activeTemplateId) || state.templates[0];
 
   const cachedRecipients = localStorage.getItem("vesper_recipients");
   if (cachedRecipients) {
@@ -172,6 +220,8 @@ function saveSettingsToCache() {
 
 function saveTemplateToCache() {
   localStorage.setItem("vesper_template", JSON.stringify(state.template));
+  localStorage.setItem("vesper_templates", JSON.stringify(state.templates));
+  localStorage.setItem("vesper_active_template_id", state.activeTemplateId);
   saveConfigToServer();
 }
 
@@ -212,6 +262,8 @@ function initializeUI() {
   }
 
   // Populate templates
+  populateTemplateSelector();
+  populatePreviewTemplateSelector();
   document.getElementById("email-subject-template").value = state.template.subject || "";
   document.getElementById("email-cc-template").value = state.template.cc || "";
   document.getElementById("email-bcc-template").value = state.template.bcc || "";
@@ -227,6 +279,7 @@ function initializeUI() {
 
   // Populate sender accounts dropdown in compose template tab
   populateSenderDropdowns();
+  updateComposeReadOnlyConfig();
 
   // Render lists if cache contains recipients
   if (state.recipients.length > 0) {
@@ -290,24 +343,7 @@ function restoreSelection() {
 
 // Setup all DOM event listeners
 function setupEventListeners() {
-  // Theme Toggle Button
-  const themeBtn = document.getElementById("theme-toggle-btn");
-  if (themeBtn) {
-    themeBtn.addEventListener("click", () => {
-      const currentTheme = document.documentElement.getAttribute("data-theme") || "dark";
-      const newTheme = currentTheme === "dark" ? "light" : "dark";
-      
-      document.documentElement.setAttribute("data-theme", newTheme);
-      localStorage.setItem("vesper_theme", newTheme);
-      
-      updateThemeToggleIcon(newTheme);
-      addLog(`Theme changed to: ${newTheme} mode`, "system");
-      showToast(`Switched to ${newTheme === 'dark' ? 'Dark' : 'Light'} Mode`, "success");
-      
-      // Update live preview in case text rendering styles need to re-align
-      updateLivePreview();
-    });
-  }
+
 
   // Tab Navigation
   document.querySelectorAll(".nav-item").forEach(item => {
@@ -335,6 +371,7 @@ function setupEventListeners() {
       
       saveSettingsToCache();
       updateMethodFieldsVisibility(e.target.value);
+      updateComposeReadOnlyConfig();
       
       // Update styling class on parent method cards
       document.querySelectorAll(".method-card").forEach(c => c.classList.remove("active"));
@@ -370,6 +407,7 @@ function setupEventListeners() {
         }
         
         saveSettingsToCache();
+        updateComposeReadOnlyConfig();
       });
     }
   });
@@ -753,34 +791,123 @@ function setupEventListeners() {
     updateLivePreview();
   });
 
-  // File drag and drop
+  const previewTemplateSelect = document.getElementById("preview-template-dropdown");
+  if (previewTemplateSelect) {
+    previewTemplateSelect.addEventListener("change", () => {
+      updateLivePreview();
+    });
+  }
+
+  const btnTogglePreview = document.getElementById("btn-toggle-preview-layout");
+  if (btnTogglePreview) {
+    btnTogglePreview.addEventListener("click", () => {
+      if (state.previewLayout === "all") {
+        state.previewLayout = "single";
+        btnTogglePreview.innerHTML = `<i data-lucide="grid" style="width: 12px; height: 12px; display: inline-block; vertical-align: middle; margin-right: 4px;"></i> View All Templates`;
+        document.getElementById("preview-template-select-container").style.display = "flex";
+      } else {
+        state.previewLayout = "all";
+        btnTogglePreview.innerHTML = `<i data-lucide="file-text" style="width: 12px; height: 12px; display: inline-block; vertical-align: middle; margin-right: 4px;"></i> View Single Template`;
+        document.getElementById("preview-template-select-container").style.display = "none";
+      }
+      updateLivePreview();
+      lucide.createIcons();
+    });
+  }
+
+  // File drag and drop (Multi-File & Multi-Sheet)
   const dropzone = document.getElementById("excel-dropzone");
   const fileInput = document.getElementById("excel-file-input");
 
-  dropzone.addEventListener("click", () => fileInput.click());
+  if (dropzone && fileInput) {
+    dropzone.addEventListener("click", () => fileInput.click());
 
-  dropzone.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    dropzone.classList.add("dragover");
-  });
+    dropzone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      dropzone.classList.add("dragover");
+    });
 
-  dropzone.addEventListener("dragleave", () => {
-    dropzone.classList.remove("dragover");
-  });
+    dropzone.addEventListener("dragleave", () => {
+      dropzone.classList.remove("dragover");
+    });
 
-  dropzone.addEventListener("drop", (e) => {
-    e.preventDefault();
-    dropzone.classList.remove("dragover");
-    if (e.dataTransfer.files.length > 0) {
-      handleExcelFile(e.dataTransfer.files[0]);
-    }
-  });
+    dropzone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropzone.classList.remove("dragover");
+      if (e.dataTransfer.files.length > 0) {
+        handleExcelFiles(e.dataTransfer.files);
+      }
+    });
 
-  fileInput.addEventListener("change", (e) => {
-    if (e.target.files.length > 0) {
-      handleExcelFile(e.target.files[0]);
-    }
-  });
+    fileInput.addEventListener("change", (e) => {
+      if (e.target.files.length > 0) {
+        handleExcelFiles(e.target.files);
+      }
+    });
+  }
+
+  // Multi-Import setup buttons
+  const btnConfirmImport = document.getElementById("btn-confirm-multi-import");
+  const btnCancelImport = document.getElementById("btn-cancel-multi-import");
+  if (btnConfirmImport) {
+    btnConfirmImport.addEventListener("click", confirmMultiImport);
+  }
+  if (btnCancelImport) {
+    btnCancelImport.addEventListener("click", () => {
+      state.stagedImportFiles = [];
+      document.getElementById("multi-import-panel").classList.add("hidden");
+    });
+  }
+
+  // Search input in upload tab
+  const uploadSearch = document.getElementById("upload-search-input");
+  if (uploadSearch) {
+    uploadSearch.addEventListener("input", (e) => {
+      renderExcelTable(e.target.value.trim());
+    });
+  }
+
+  // Queue Filters
+  const filterTemplate = document.getElementById("queue-filter-template");
+  const filterFile = document.getElementById("queue-filter-file");
+  const filterStatus = document.getElementById("queue-filter-status");
+  const queueSearch = document.getElementById("queue-search-input");
+
+  if (filterTemplate) {
+    filterTemplate.addEventListener("change", (e) => {
+      state.queueFilters.template = e.target.value;
+      renderQueueTable();
+    });
+  }
+  if (filterFile) {
+    filterFile.addEventListener("change", (e) => {
+      state.queueFilters.file = e.target.value;
+      renderQueueTable();
+    });
+  }
+  if (filterStatus) {
+    filterStatus.addEventListener("change", (e) => {
+      state.queueFilters.status = e.target.value;
+      renderQueueTable();
+    });
+  }
+  if (queueSearch) {
+    queueSearch.addEventListener("input", (e) => {
+      state.queueFilters.search = e.target.value.trim();
+      renderQueueTable();
+    });
+  }
+
+  // Batch Queue Operations
+  const btnApplyBatchTemplate = document.getElementById("btn-apply-batch-template");
+  const btnDeleteSelectedBatch = document.getElementById("btn-delete-selected-batch");
+
+  if (btnApplyBatchTemplate) {
+    btnApplyBatchTemplate.addEventListener("click", applyBatchTemplate);
+  }
+  if (btnDeleteSelectedBatch) {
+    btnDeleteSelectedBatch.addEventListener("click", deleteSelectedQueueRows);
+  }
 
   // Clear list button
   document.getElementById("btn-clear-excel").addEventListener("click", () => {
@@ -791,6 +918,7 @@ function setupEventListeners() {
     document.getElementById("excel-preview-table").querySelector("tbody").innerHTML = "";
     updateSummaryStats();
     populateRecipientDropdown();
+    populateTemplateSelector();
     renderQueueTable();
     showToast("Recipient list cleared", "info");
     addLog("Recipient list cleared by user.", "warning");
@@ -900,6 +1028,29 @@ function setupEventListeners() {
     // Uncheck select all
     document.getElementById("select-all-queue-rows").checked = false;
   });
+
+  // Template Manager listeners
+  const templateSelect = document.getElementById("composer-template-selector");
+  if (templateSelect) {
+    templateSelect.addEventListener("change", (e) => {
+      handleTemplateChange(e.target.value);
+    });
+  }
+
+  const btnCreateTemplate = document.getElementById("btn-create-template");
+  if (btnCreateTemplate) {
+    btnCreateTemplate.addEventListener("click", createNewTemplate);
+  }
+
+  const btnRenameTemplate = document.getElementById("btn-rename-template");
+  if (btnRenameTemplate) {
+    btnRenameTemplate.addEventListener("click", renameTemplate);
+  }
+
+  const btnDeleteTemplate = document.getElementById("btn-delete-template");
+  if (btnDeleteTemplate) {
+    btnDeleteTemplate.addEventListener("click", deleteTemplate);
+  }
 }
 
 // Tab Switching Mechanism
@@ -927,7 +1078,11 @@ function switchTab(tabId) {
     subtitle.textContent = "Upload your Excel template and preview recipient lists";
   } else if (tabId === "composer") {
     title.textContent = "Email Template Builder";
-    subtitle.textContent = "Draft your personalized body and preview variables";
+    subtitle.textContent = "Draft your personalized body and variables";
+  } else if (tabId === "preview") {
+    title.textContent = "Personalized Campaign Preview";
+    subtitle.textContent = "Review each customized email output before scheduling";
+    populatePreviewTemplateSelector();
     updateLivePreview();
   } else if (tabId === "queue") {
     title.textContent = "Active Scheduler Engine";
@@ -984,6 +1139,10 @@ function showToast(message, type = "info") {
 // Logs terminal writer
 function addLog(message, type = "system") {
   const consoleLogs = document.getElementById("console-logs");
+  if (!consoleLogs) {
+    console.log(`[${type}] ${message}`);
+    return;
+  }
   const time = new Date().toLocaleTimeString();
   const line = document.createElement("div");
   line.className = `console-line ${type}`;
@@ -993,136 +1152,330 @@ function addLog(message, type = "system") {
   consoleLogs.scrollTop = consoleLogs.scrollHeight;
 }
 
-// Parse dates/times from spreadsheets
-function parseScheduleTime(val) {
-  if (!val) return null;
-  
-  // If it's already a JS Date object
-  if (val instanceof Date) {
-    return isNaN(val.getTime()) ? null : val;
+// Parse dates/times from spreadsheets (supports single combined string or separate date & time columns)
+function parseScheduleTime(dateVal, timeVal) {
+  // Swap if only timeVal is passed in dateVal slot
+  if ((dateVal === undefined || dateVal === null || dateVal === "") && timeVal) {
+    dateVal = timeVal;
+    timeVal = null;
   }
 
-  // Handle Excel Serial Date Number
-  if (typeof val === "number") {
-    // Excel base date is Dec 30 1899, not Jan 1 1900 because Excel incorrectly treats 1900 as a leap year
-    const baseDate = new Date(1899, 11, 30);
-    const dateVal = new Date(baseDate.getTime() + val * 24 * 60 * 60 * 1000);
-    return isNaN(dateVal.getTime()) ? null : dateVal;
-  }
+  if (!dateVal && !timeVal) return null;
 
-  // Handle Strings
-  if (typeof val === "string") {
-    const trimmed = val.trim();
-    if (trimmed === "") return null;
-
-    // First try standard parsing (covers ISO dates, standard date-time formats)
-    let parsed = new Date(trimmed);
-    if (!isNaN(parsed.getTime())) {
-      // Check if it parsed standard dates like "2026-06-26 15:30:00"
-      return parsed;
+  // Helper: parse time component
+  function parseTimeParts(tVal) {
+    if (typeof tVal === "number") {
+      // Excel fractional day for time, e.g. 0.5 = 12:00 PM, 0.60416 = 14:30
+      const totalSeconds = Math.round((tVal % 1) * 86400);
+      const hours = Math.floor(totalSeconds / 3600) % 24;
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      return { hours, minutes, seconds };
     }
+    if (typeof tVal === "string") {
+      const trimmed = tVal.trim();
+      if (!trimmed) return null;
+      const match = trimmed.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i);
+      if (match) {
+        let hours = parseInt(match[1]);
+        const minutes = parseInt(match[2]);
+        const seconds = match[3] ? parseInt(match[3]) : 0;
+        const ampm = match[4];
+        if (ampm) {
+          if (ampm.toUpperCase() === "PM" && hours < 12) hours += 12;
+          if (ampm.toUpperCase() === "AM" && hours === 12) hours = 0;
+        }
+        return { hours, minutes, seconds };
+      }
+    }
+    return null;
+  }
 
-    // Try parsing HH:MM or HH:MM AM/PM (relative to current day)
+  // Helper: parse date component
+  function parseDateParts(dVal) {
+    if (dVal instanceof Date) {
+      return isNaN(dVal.getTime()) ? null : {
+        year: dVal.getFullYear(),
+        monthIndex: dVal.getMonth(),
+        day: dVal.getDate(),
+        hours: dVal.getHours(),
+        minutes: dVal.getMinutes(),
+        seconds: dVal.getSeconds()
+      };
+    }
+    if (typeof dVal === "number") {
+      // Excel Serial Date number
+      const baseDate = new Date(1899, 11, 30);
+      const d = new Date(baseDate.getTime() + Math.floor(dVal) * 86400000);
+      if (isNaN(d.getTime())) return null;
+
+      // Extract time fraction if present in serial number
+      const frac = dVal % 1;
+      let hours = 0, minutes = 0, seconds = 0;
+      if (frac > 0) {
+        const totSec = Math.round(frac * 86400);
+        hours = Math.floor(totSec / 3600) % 24;
+        minutes = Math.floor((totSec % 3600) / 60);
+        seconds = totSec % 60;
+      }
+      return {
+        year: d.getFullYear(),
+        monthIndex: d.getMonth(),
+        day: d.getDate(),
+        hours, minutes, seconds
+      };
+    }
+    if (typeof dVal === "string") {
+      const str = dVal.trim();
+      if (!str) return null;
+
+      // YYYY-MM-DD or DD/MM/YYYY or MM/DD/YYYY date-only regex
+      const dateOnlyMatch = str.match(/^(\d{1,4})[\/\-](\d{1,2})[\/\-](\d{1,4})$/);
+      if (dateOnlyMatch) {
+        let p1 = parseInt(dateOnlyMatch[1]);
+        let p2 = parseInt(dateOnlyMatch[2]);
+        let p3 = parseInt(dateOnlyMatch[3]);
+
+        let year, monthIndex, day;
+        if (p1 > 1000) {
+          year = p1;
+          monthIndex = p2 - 1;
+          day = p3;
+        } else if (p3 > 1000) {
+          year = p3;
+          if (p1 > 12) {
+            day = p1;
+            monthIndex = p2 - 1;
+          } else {
+            monthIndex = p1 - 1;
+            day = p2;
+          }
+        }
+        if (year && monthIndex >= 0 && day) {
+          return { year, monthIndex, day, hours: 0, minutes: 0, seconds: 0 };
+        }
+      }
+
+      const fullDate = new Date(str);
+      if (!isNaN(fullDate.getTime())) {
+        return {
+          year: fullDate.getFullYear(),
+          monthIndex: fullDate.getMonth(),
+          day: fullDate.getDate(),
+          hours: fullDate.getHours(),
+          minutes: fullDate.getMinutes(),
+          seconds: fullDate.getSeconds()
+        };
+      }
+    }
+    return null;
+  }
+
+  // When BOTH dateVal and timeVal are supplied (e.g. S_Date + S_Time)
+  if (dateVal && timeVal) {
+    const dParts = parseDateParts(dateVal);
+    const tParts = parseTimeParts(timeVal);
+
+    if (dParts && tParts) {
+      return new Date(dParts.year, dParts.monthIndex, dParts.day, tParts.hours, tParts.minutes, tParts.seconds);
+    }
+    if (dParts) {
+      const combinedStr = `${String(dateVal).trim()} ${String(timeVal).trim()}`;
+      const combinedDate = new Date(combinedStr);
+      if (!isNaN(combinedDate.getTime())) return combinedDate;
+      return new Date(dParts.year, dParts.monthIndex, dParts.day, dParts.hours, dParts.minutes, dParts.seconds);
+    }
+  }
+
+  // Single parameter fallback
+  const tPartsOnly = parseTimeParts(dateVal);
+  if (tPartsOnly) {
     const today = new Date();
-    // Match 12-hour or 24-hour patterns
-    const timeMatch = trimmed.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i);
-    if (timeMatch) {
-      let hours = parseInt(timeMatch[1]);
-      const minutes = parseInt(timeMatch[2]);
-      const seconds = timeMatch[3] ? parseInt(timeMatch[3]) : 0;
-      const ampm = timeMatch[4];
-
-      if (ampm) {
-        if (ampm.toUpperCase() === "PM" && hours < 12) hours += 12;
-        if (ampm.toUpperCase() === "AM" && hours === 12) hours = 0;
-      }
-
-      today.setHours(hours, minutes, seconds, 0);
-
-      // If the time has already passed today, push it to tomorrow
-      if (today.getTime() < Date.now()) {
-        today.setDate(today.getDate() + 1);
-      }
-      return today;
+    today.setHours(tPartsOnly.hours, tPartsOnly.minutes, tPartsOnly.seconds, 0);
+    if (today.getTime() < Date.now()) {
+      today.setDate(today.getDate() + 1);
     }
-
-    // Match full date paths like "7/1/2026 6:26:07 PM" or "26/06/2026 15:30" (DD/MM/YYYY or MM/DD/YYYY)
-    const dateMatch = trimmed.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i);
-    if (dateMatch) {
-      const p1 = parseInt(dateMatch[1]);
-      const p2 = parseInt(dateMatch[2]);
-      const year = parseInt(dateMatch[3]);
-      let hours = parseInt(dateMatch[4]);
-      const minutes = parseInt(dateMatch[5]);
-      const seconds = dateMatch[6] ? parseInt(dateMatch[6]) : 0;
-      const ampm = dateMatch[7];
-
-      if (ampm) {
-        if (ampm.toUpperCase() === "PM" && hours < 12) hours += 12;
-        if (ampm.toUpperCase() === "AM" && hours === 12) hours = 0;
-      }
-
-      // Determine Month Index and Day
-      // If p1 > 12, it must be D/M/YYYY
-      // Otherwise, default to US format M/D/YYYY
-      let monthIndex = p1 - 1;
-      let day = p2;
-      if (p1 > 12) {
-        monthIndex = p2 - 1;
-        day = p1;
-      }
-
-      const dateObj = new Date(year, monthIndex, day, hours, minutes, seconds);
-      return isNaN(dateObj.getTime()) ? null : dateObj;
-    }
+    return today;
   }
 
-  return null;
+  const dPartsOnly = parseDateParts(dateVal);
+  if (dPartsOnly) {
+    return new Date(dPartsOnly.year, dPartsOnly.monthIndex, dPartsOnly.day, dPartsOnly.hours, dPartsOnly.minutes, dPartsOnly.seconds);
+  }
+
+  const fallback = new Date(String(dateVal));
+  return isNaN(fallback.getTime()) ? null : fallback;
 }
 
 // Handle imported spreadsheet parsing
-function handleExcelFile(file) {
-  const reader = new FileReader();
-  
-  addLog(`Reading file: ${file.name} (${(file.size / 1024).toFixed(1)} KB)...`, "system");
-  
-  reader.onload = (e) => {
-    try {
-      const data = e.target.result;
-      const workbook = XLSX.read(data, { type: "binary" }); // Removed cellDates: true to avoid timezone shifts
-      
-      const sheetName = workbook.SheetNames[0];
-      const sheet = workbook.Sheets[sheetName];
-      
-      const rows = XLSX.utils.sheet_to_json(sheet, { header: "A", raw: false, defval: "" });
-      
-      if (rows.length === 0) {
-        throw new Error("The selected Excel sheet contains no rows of data.");
+// Handle importing multiple spreadsheet files and multi-sheet workbooks
+function handleExcelFiles(files) {
+  if (!files || files.length === 0) return;
+
+  state.stagedImportFiles = [];
+  const fileList = Array.from(files);
+  let filesRead = 0;
+
+  addLog(`Reading ${fileList.length} spreadsheet file(s)...`, "system");
+
+  fileList.forEach(file => {
+    const reader = new FileReader();
+
+    reader.onload = (e) => {
+      try {
+        const data = e.target.result;
+        const workbook = XLSX.read(data, { type: "binary" });
+
+        workbook.SheetNames.forEach(sheetName => {
+          const sheet = workbook.Sheets[sheetName];
+          const rows = XLSX.utils.sheet_to_json(sheet, { header: "A", raw: false, defval: "" });
+
+          if (rows && rows.length > 0) {
+            // Find auto-detected template ID if sheet name matches template name
+            let autoTemplateId = state.activeTemplateId;
+            const matchedTemplate = state.templates.find(t => t.name.trim().toLowerCase() === sheetName.trim().toLowerCase());
+            if (matchedTemplate) {
+              autoTemplateId = matchedTemplate.id;
+            }
+
+            state.stagedImportFiles.push({
+              fileName: file.name,
+              sheetName: sheetName,
+              rows: rows,
+              selectedTemplateId: autoTemplateId
+            });
+          }
+        });
+      } catch (err) {
+        console.error(`Error parsing file ${file.name}:`, err);
+        showToast(`Failed to parse ${file.name}: ${err.message}`, "error");
+      } finally {
+        filesRead++;
+        if (filesRead === fileList.length) {
+          showMultiImportSetupPanel();
+        }
       }
+    };
 
-      processImportedRows(rows);
-      showToast(`Imported ${state.recipients.length} recipients!`, "success");
-      
-    } catch (err) {
-      console.error(err);
-      showToast(err.message, "error");
-      addLog(`Failed to parse spreadsheet: ${err.message}`, "error");
-    }
-  };
+    reader.onerror = () => {
+      filesRead++;
+      showToast(`Error reading file ${file.name}`, "error");
+      if (filesRead === fileList.length) {
+        showMultiImportSetupPanel();
+      }
+    };
 
-  reader.onerror = () => {
-    showToast("File reading error.", "error");
-    addLog("FileReader encounter an error reading the file.", "error");
-  };
+    reader.readAsBinaryString(file);
+  });
+}
 
-  reader.readAsBinaryString(file);
+// Display the multi-import template assignment setup panel
+function showMultiImportSetupPanel() {
+  if (state.stagedImportFiles.length === 0) {
+    showToast("No valid rows found in selected files.", "warning");
+    return;
+  }
+
+  const panel = document.getElementById("multi-import-panel");
+  const countBadge = document.getElementById("multi-import-files-count");
+  const listContainer = document.getElementById("multi-import-items-list");
+
+  if (!panel || !listContainer) return;
+
+  countBadge.textContent = `${state.stagedImportFiles.length} Sheet(s) Ready`;
+  listContainer.innerHTML = "";
+
+  state.stagedImportFiles.forEach((staged, idx) => {
+    const itemRow = document.createElement("div");
+    itemRow.style.display = "flex";
+    itemRow.style.alignItems = "center";
+    itemRow.style.justifyContent = "space-between";
+    itemRow.style.padding = "8px 12px";
+    itemRow.style.background = "var(--bg-secondary)";
+    itemRow.style.border = "1px solid var(--border-color)";
+    itemRow.style.borderRadius = "var(--radius-sm)";
+    itemRow.style.gap = "12px";
+
+    const labelHtml = `
+      <div style="display: flex; flex-direction: column;">
+        <span style="font-size: 13px; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
+          <i data-lucide="file-spreadsheet" style="width: 14px; height: 14px; color: var(--color-indigo);"></i>
+          ${escapeHtml(staged.fileName)} <span class="badge badge-outline-gray" style="font-size: 10px;">${escapeHtml(staged.sheetName)}</span>
+        </span>
+        <span style="font-size: 11px; color: var(--text-muted);">${staged.rows.length} total rows parsed</span>
+      </div>
+    `;
+
+    const select = document.createElement("select");
+    select.className = "form-control xs-input";
+    select.style.padding = "4px 8px";
+    select.style.fontSize = "12px";
+    select.style.maxWidth = "260px";
+
+    const autoOpt = document.createElement("option");
+    autoOpt.value = "auto";
+    autoOpt.textContent = "⚡ Auto-Detect (Column header or Sheet)";
+    select.appendChild(autoOpt);
+
+    state.templates.forEach(t => {
+      const opt = document.createElement("option");
+      opt.value = t.id;
+      opt.textContent = `Template: ${t.name}`;
+      if (staged.selectedTemplateId === t.id) {
+        opt.selected = true;
+      }
+      select.appendChild(opt);
+    });
+
+    select.addEventListener("change", (e) => {
+      staged.selectedTemplateId = e.target.value;
+    });
+
+    itemRow.innerHTML = labelHtml;
+    itemRow.appendChild(select);
+    listContainer.appendChild(itemRow);
+  });
+
+  panel.classList.remove("hidden");
+  lucide.createIcons();
+}
+
+// Confirm multi-import and process staged rows
+function confirmMultiImport() {
+  const mode = document.querySelector('input[name="import-mode"]:checked')?.value || "append";
+  
+  if (mode === "replace") {
+    state.recipients = [];
+  }
+
+  let totalAdded = 0;
+  let totalDiscarded = 0;
+
+  state.stagedImportFiles.forEach(staged => {
+    const { added, invalid } = processImportedRows(staged.rows, staged.fileName, staged.sheetName, staged.selectedTemplateId);
+    totalAdded += added;
+    totalDiscarded += invalid;
+  });
+
+  state.stagedImportFiles = [];
+  document.getElementById("multi-import-panel").classList.add("hidden");
+
+  saveRecipientsToCache();
+  
+  // Show section and update views
+  document.getElementById("parsed-data-section").classList.remove("hidden");
+  renderExcelTable();
+  updateSummaryStats();
+  populateRecipientDropdown();
+  populateTemplateSelector();
+  renderQueueTable();
+
+  showToast(`Successfully imported ${totalAdded} recipients!`, "success");
+  addLog(`Batch Import complete: Added ${totalAdded} recipients across ${state.recipients.length} total queue items. Discarded ${totalDiscarded} incomplete rows.`, "success");
 }
 
 // Clean and map imported columns to standardized format
-function processImportedRows(rows) {
-  state.recipients = [];
-  state.headers = {};
-
+function processImportedRows(rows, fileName = "Upload.xlsx", sheetName = "Sheet1", defaultTemplateId = "auto") {
   // Find the header row (the first row containing a field like 'email' or 'mail')
   let headerRowIndex = 0;
   for (let i = 0; i < Math.min(rows.length, 10); i++) {
@@ -1138,7 +1491,7 @@ function processImportedRows(rows) {
   // Extract all valid column letter keys
   const colLetters = Object.keys(headerRow).filter(k => /^[A-Z]+$/i.test(k));
   
-  // Save to state.headers
+  // Merge or save to state.headers
   colLetters.forEach(col => {
     state.headers[col] = String(headerRow[col]).trim();
   });
@@ -1171,10 +1524,13 @@ function processImportedRows(rows) {
   const ccCol = getColumnLetter(headerRow, ["CC", "Cc", "Cc Email", "Carbon Copy"]);
   const bccCol = getColumnLetter(headerRow, ["BCC", "Bcc", "Bcc Email", "Blind Carbon Copy"]);
   const senderCol = getColumnLetter(headerRow, ["Sender", "Sender Email", "From", "Send From"]);
+  const senderNameCol = getColumnLetter(headerRow, ["Sender Name", "SenderName", "FromName", "From Name", "Sender_Name"]);
   const actionCol = getColumnLetter(headerRow, ["Action", "Type", "Method", "Mode", "Scheduling Action"]);
-  const sTimeCol = getColumnLetter(headerRow, ["S_Time", "S-Time", "STime", "S Time", "Schedule Time", "Send Time", "Schedule"]);
+  const sDateCol = getColumnLetter(headerRow, ["S_Date", "S-Date", "SDate", "S Date", "Schedule Date", "Send Date", "Date"]);
+  const sTimeCol = getColumnLetter(headerRow, ["S_Time", "S-Time", "STime", "S Time", "Schedule Time", "Send Time", "Time"]);
+  const templateCol = getColumnLetter(headerRow, ["Template", "Template Name", "TemplateID", "Template ID", "Mail Template", "Email Template"]);
 
-  let rowCounter = 0;
+  let addedCount = 0;
   let invalidCounter = 0;
 
   // Process data rows
@@ -1194,9 +1550,31 @@ function processImportedRows(rows) {
     const time = timeCol ? getStringValue(row[timeCol]) : "";
     const cc = ccCol ? getStringValue(row[ccCol]) : "";
     const bcc = bccCol ? getStringValue(row[bccCol]) : "";
-    const senderEmailStr = senderCol ? String(row[senderCol]).trim().toLowerCase() : "";
+    
+    const rawSenderVal = senderCol ? getStringValue(row[senderCol]) : "";
+    const rawSenderNameVal = senderNameCol ? getStringValue(row[senderNameCol]) : "";
+
+    let derivedSenderName = rawSenderNameVal;
+    let derivedSender = rawSenderVal;
+
+    if (rawSenderVal) {
+      if (rawSenderVal.includes('<') && rawSenderVal.includes('>')) {
+        const namePart = rawSenderVal.split('<')[0].trim().replace(/^["'\s]+|["'\s]+$/g, '');
+        const emailPart = rawSenderVal.split('<')[1].split('>')[0].trim();
+        if (!derivedSenderName && namePart) derivedSenderName = namePart;
+        derivedSender = emailPart;
+      } else if (!rawSenderVal.includes('@') || rawSenderVal.includes(' ')) {
+        if (!derivedSenderName) derivedSenderName = rawSenderVal;
+        derivedSender = rawSenderVal;
+      } else {
+        derivedSender = rawSenderVal;
+      }
+    }
+
     const actionStr = actionCol ? String(row[actionCol]).trim().toLowerCase() : "";
-    const rawSTime = sTimeCol ? row[sTimeCol] : "";
+    const rawSDate = sDateCol ? row[sDateCol] : (dateCol ? row[dateCol] : "");
+    const rawSTime = sTimeCol ? row[sTimeCol] : (timeCol ? row[timeCol] : "");
+    const rowTemplateVal = templateCol ? getStringValue(row[templateCol]) : "";
 
     // Require Name and Email
     if (!name || !email) {
@@ -1204,15 +1582,36 @@ function processImportedRows(rows) {
       continue;
     }
 
-    const parsedTime = parseScheduleTime(rawSTime);
-    rowCounter++;
+    // Determine row's template
+    let rowTemplateId = "";
+    if (rowTemplateVal) {
+      const matched = state.templates.find(t => 
+        t.id.toLowerCase() === rowTemplateVal.toLowerCase() || 
+        t.name.toLowerCase() === rowTemplateVal.toLowerCase()
+      );
+      if (matched) rowTemplateId = matched.id;
+    }
+
+    if (!rowTemplateId && defaultTemplateId && defaultTemplateId !== "auto") {
+      rowTemplateId = defaultTemplateId;
+    }
+
+    if (!rowTemplateId) {
+      // Auto match sheet name to template
+      const matchedSheetTemp = state.templates.find(t => t.name.toLowerCase() === sheetName.toLowerCase());
+      rowTemplateId = matchedSheetTemp ? matchedSheetTemp.id : state.activeTemplateId;
+    }
+
+    const parsedTime = parseScheduleTime(rawSDate, rawSTime);
+    addedCount++;
 
     // Match sender account
     let matchedAcc = null;
-    if (senderEmailStr && state.settings.senderAccounts) {
+    const lookupSender = (derivedSender || "").toLowerCase();
+    if (lookupSender && state.settings.senderAccounts) {
       matchedAcc = state.settings.senderAccounts.find(acc => 
-        acc.user.toLowerCase() === senderEmailStr || 
-        acc.label.toLowerCase() === senderEmailStr
+        acc.user.toLowerCase() === lookupSender || 
+        acc.label.toLowerCase() === lookupSender
       );
     }
     const senderAccountId = matchedAcc ? matchedAcc.id : (state.template.senderAccountId || "");
@@ -1236,18 +1635,24 @@ function processImportedRows(rows) {
     });
 
     state.recipients.push({
-      id: `recipient-${rowCounter}-${Date.now()}`,
+      id: `recipient-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
       name: name,
       email: email,
       affiliation: affiliation,
-      date: date,
+      date: date || String(rawSDate || ""),
       techScheduleName: techScheduleName,
       session: techScheduleName,
-      time: time,
-      rawTime: String(rawSTime || "Now"),
+      time: time || String(rawSTime || ""),
+      rawSDate: String(rawSDate || ""),
+      rawSTime: String(rawSTime || ""),
+      rawTime: String(rawSTime || rawSDate || "Now"),
       parsedTime: parsedTime || new Date(),
+      templateId: rowTemplateId,
+      sourceFile: fileName,
+      sourceSheet: sheetName,
       senderAccountId: senderAccountId,
-      sender: senderEmailStr || (matchedAcc ? matchedAcc.user : ""),
+      sender: derivedSender || (matchedAcc ? matchedAcc.user : ""),
+      senderName: derivedSenderName,
       action: action,
       cc: cc || state.template.cc || "",
       bcc: bcc || state.template.bcc || "",
@@ -1255,17 +1660,6 @@ function processImportedRows(rows) {
       colValues: colValues
     });
   }
-
-  saveRecipientsToCache();
-  
-  // Show imported sections
-  document.getElementById("parsed-data-section").classList.remove("hidden");
-  
-  // Update views
-  renderExcelTable();
-  updateSummaryStats();
-  populateRecipientDropdown();
-  renderQueueTable();
 
   // Re-build column headers and merge tags dropdown dynamically
   updateMergeTagsMenu(colLetters, headerRow);
@@ -1277,52 +1671,153 @@ function processImportedRows(rows) {
     session: techSchedCol,
     time: timeCol
   });
-  
-  addLog(`Successfully processed ${state.recipients.length} rows. Discarded ${invalidCounter} incomplete rows.`, "system");
+
+  return { added: addedCount, invalid: invalidCounter };
 }
 
 // Render imported rows in the upload panel
-function renderExcelTable() {
+function renderExcelTable(searchQuery = "") {
   const tbody = document.getElementById("excel-preview-table").querySelector("tbody");
+  if (!tbody) return;
   tbody.innerHTML = "";
 
-  state.recipients.forEach((rec, idx) => {
+  let list = state.recipients;
+  if (searchQuery) {
+    const q = searchQuery.toLowerCase();
+    list = list.filter(r => 
+      r.name.toLowerCase().includes(q) || 
+      r.email.toLowerCase().includes(q) || 
+      r.affiliation.toLowerCase().includes(q) ||
+      (r.sourceFile || "").toLowerCase().includes(q)
+    );
+  }
+
+  list.forEach((rec, idx) => {
     const row = document.createElement("tr");
     
     const displayTime = rec.parsedTime 
       ? rec.parsedTime.toLocaleString() 
       : `<span class="text-coral">Immediate</span>`;
 
+    const tObj = state.templates.find(t => t.id === rec.templateId) || state.templates[0];
+    const templateName = tObj ? tObj.name : "Default";
+    const fileSourceStr = `${escapeHtml(rec.sourceFile || 'Upload.xlsx')} (${escapeHtml(rec.sourceSheet || 'Sheet1')})`;
+
     row.innerHTML = `
       <td>${idx + 1}</td>
       <td class="text-bold">${escapeHtml(rec.name)}</td>
       <td class="text-teal">${escapeHtml(rec.email)}</td>
       <td>${escapeHtml(rec.affiliation)}</td>
+      <td><span class="badge badge-indigo" title="Assigned Template">${escapeHtml(templateName)}</span></td>
+      <td><span class="badge badge-outline-gray">${fileSourceStr}</span></td>
       <td>${escapeHtml(rec.date || "—")}</td>
       <td>${escapeHtml(rec.techScheduleName || "—")}</td>
-      <td>${escapeHtml(rec.time || "—")}</td>
-      <td><code>${escapeHtml(rec.rawTime || "Now")}</code></td>
+      <td><code>${escapeHtml(rec.rawSDate || "—")}</code></td>
+      <td><code>${escapeHtml(rec.rawSTime || "Now")}</code></td>
       <td>${displayTime}</td>
     `;
     tbody.appendChild(row);
   });
 }
 
+// Populate Filter Options for Queue
+function updateQueueFilterDropdowns() {
+  const templateSelect = document.getElementById("queue-filter-template");
+  const fileSelect = document.getElementById("queue-filter-file");
+  const batchTemplateSelect = document.getElementById("batch-assign-template-select");
+
+  if (templateSelect) {
+    const currTemp = state.queueFilters.template || "all";
+    templateSelect.innerHTML = `<option value="all">All Templates (${state.recipients.length})</option>`;
+    
+    state.templates.forEach(t => {
+      const count = state.recipients.filter(r => (r.templateId || state.activeTemplateId) === t.id).length;
+      const opt = document.createElement("option");
+      opt.value = t.id;
+      opt.textContent = `${t.name} (${count})`;
+      if (t.id === currTemp) opt.selected = true;
+      templateSelect.appendChild(opt);
+    });
+  }
+
+  if (fileSelect) {
+    const currFile = state.queueFilters.file || "all";
+    fileSelect.innerHTML = `<option value="all">All Files</option>`;
+
+    const distinctFiles = Array.from(new Set(state.recipients.map(r => r.sourceFile || "Upload.xlsx")));
+    distinctFiles.forEach(fileName => {
+      const count = state.recipients.filter(r => (r.sourceFile || "Upload.xlsx") === fileName).length;
+      const opt = document.createElement("option");
+      opt.value = fileName;
+      opt.textContent = `${fileName} (${count})`;
+      if (fileName === currFile) opt.selected = true;
+      fileSelect.appendChild(opt);
+    });
+  }
+
+  if (batchTemplateSelect) {
+    batchTemplateSelect.innerHTML = "";
+    state.templates.forEach(t => {
+      const opt = document.createElement("option");
+      opt.value = t.id;
+      opt.textContent = t.name;
+      batchTemplateSelect.appendChild(opt);
+    });
+  }
+}
+
 // Render the active queue in the Queue manager panel
 function renderQueueTable() {
+  updateQueueFilterDropdowns();
+
   const tbody = document.getElementById("queue-details-table").querySelector("tbody");
+  if (!tbody) return;
   tbody.innerHTML = "";
 
   if (state.recipients.length === 0) {
     tbody.innerHTML = `
       <tr>
-        <td colspan="9" class="text-center text-muted">No emails loaded in the schedule queue yet. Import an Excel file first.</td>
+        <td colspan="11" class="text-center text-muted" style="padding: 40px 16px;">No emails loaded in the schedule queue yet. Import an Excel file first.</td>
       </tr>
     `;
     return;
   }
 
-  state.recipients.forEach(rec => {
+  // Filter recipients
+  let filtered = state.recipients;
+  const fTemp = state.queueFilters.template;
+  const fFile = state.queueFilters.file;
+  const fStatus = state.queueFilters.status;
+  const fSearch = state.queueFilters.search;
+
+  if (fTemp && fTemp !== "all") {
+    filtered = filtered.filter(r => (r.templateId || state.activeTemplateId) === fTemp);
+  }
+  if (fFile && fFile !== "all") {
+    filtered = filtered.filter(r => (r.sourceFile || "Upload.xlsx") === fFile);
+  }
+  if (fStatus && fStatus !== "all") {
+    filtered = filtered.filter(r => r.status === fStatus);
+  }
+  if (fSearch) {
+    const q = fSearch.toLowerCase();
+    filtered = filtered.filter(r => 
+      r.name.toLowerCase().includes(q) || 
+      r.email.toLowerCase().includes(q) || 
+      r.affiliation.toLowerCase().includes(q)
+    );
+  }
+
+  if (filtered.length === 0) {
+    tbody.innerHTML = `
+      <tr>
+        <td colspan="11" class="text-center text-muted" style="padding: 30px 16px;">No jobs match the active template or file filters.</td>
+      </tr>
+    `;
+    return;
+  }
+
+  filtered.forEach(rec => {
     const row = document.createElement("tr");
     row.id = `row-${rec.id}`;
     
@@ -1342,6 +1837,42 @@ function renderQueueTable() {
     emailTd.className = "text-teal";
     emailTd.textContent = rec.email;
     row.appendChild(emailTd);
+
+    // Template Dropdown
+    const templateTd = document.createElement("td");
+    const templateSelect = document.createElement("select");
+    templateSelect.className = "form-control xs-input";
+    templateSelect.style.padding = "4px 8px";
+    templateSelect.style.fontSize = "12px";
+    templateSelect.style.height = "auto";
+    
+    state.templates.forEach(t => {
+      const opt = document.createElement("option");
+      opt.value = t.id;
+      opt.textContent = t.name;
+      if (rec.templateId === t.id || (!rec.templateId && t.id === state.activeTemplateId)) {
+        opt.selected = true;
+      }
+      templateSelect.appendChild(opt);
+    });
+    
+    templateSelect.addEventListener("change", (e) => {
+      rec.templateId = e.target.value;
+      saveRecipientsToCache();
+      const tName = state.templates.find(temp => temp.id === rec.templateId)?.name || 'Default';
+      addLog(`Updated template for ${rec.name} to "${tName}".`, "system");
+      updateQueueFilterDropdowns();
+      populateTemplateSelector();
+    });
+    templateTd.appendChild(templateSelect);
+    row.appendChild(templateTd);
+
+    // Source File / Sheet Column
+    const sourceTd = document.createElement("td");
+    const fileStr = escapeHtml(rec.sourceFile || "Upload.xlsx");
+    const sheetStr = escapeHtml(rec.sourceSheet || "Sheet1");
+    sourceTd.innerHTML = `<span class="badge badge-outline-gray" style="font-size: 11px;" title="${fileStr}">${fileStr} (${sheetStr})</span>`;
+    row.appendChild(sourceTd);
 
     // Sender Account Dropdown
     const senderTd = document.createElement("td");
@@ -1454,7 +1985,75 @@ function renderQueueTable() {
     tbody.appendChild(row);
   });
 
+  // Checkbox listeners to update selection count
+  document.querySelectorAll(".queue-row-checkbox").forEach(cb => {
+    cb.addEventListener("change", updateSelectedRowsCount);
+  });
+  updateSelectedRowsCount();
+
   lucide.createIcons();
+}
+
+// Helper: Update selected row counter
+function updateSelectedRowsCount() {
+  const selected = document.querySelectorAll(".queue-row-checkbox:checked");
+  const counterEl = document.getElementById("selected-rows-count");
+  if (counterEl) {
+    counterEl.textContent = selected.length;
+  }
+}
+
+// Batch apply template to selected rows
+function applyBatchTemplate() {
+  const selectedCbs = document.querySelectorAll(".queue-row-checkbox:checked");
+  if (selectedCbs.length === 0) {
+    showToast("Please select at least one row in the queue.", "warning");
+    return;
+  }
+
+  const targetTemplateId = document.getElementById("batch-assign-template-select").value;
+  const targetTempObj = state.templates.find(t => t.id === targetTemplateId);
+  const targetTempName = targetTempObj ? targetTempObj.name : "Default";
+
+  selectedCbs.forEach(cb => {
+    const recId = cb.getAttribute("data-id");
+    const rec = state.recipients.find(r => r.id === recId);
+    if (rec) {
+      rec.templateId = targetTemplateId;
+    }
+  });
+
+  saveRecipientsToCache();
+  renderQueueTable();
+  populateTemplateSelector();
+  showToast(`Assigned template "${targetTempName}" to ${selectedCbs.length} recipient(s)!`, "success");
+  addLog(`Batch assigned template "${targetTempName}" to ${selectedCbs.length} recipient(s).`, "system");
+}
+
+// Batch delete selected rows from queue
+function deleteSelectedQueueRows() {
+  const selectedCbs = document.querySelectorAll(".queue-row-checkbox:checked");
+  if (selectedCbs.length === 0) {
+    showToast("Please select at least one row to delete.", "warning");
+    return;
+  }
+
+  if (!confirm(`Are you sure you want to delete ${selectedCbs.length} selected row(s) from the queue?`)) {
+    return;
+  }
+
+  const selectedIds = Array.from(selectedCbs).map(cb => cb.getAttribute("data-id"));
+  state.recipients = state.recipients.filter(r => !selectedIds.includes(r.id));
+
+  saveRecipientsToCache();
+  renderQueueTable();
+  renderExcelTable();
+  updateSummaryStats();
+  populateRecipientDropdown();
+  populateTemplateSelector();
+
+  showToast(`Deleted ${selectedIds.length} row(s) from queue`, "info");
+  addLog(`Batch deleted ${selectedIds.length} recipient(s) from queue.`, "warning");
 }
 
 // Calculate remaining countdown string
@@ -1482,7 +2081,10 @@ function getStatusBadgeHtml(status, error) {
     return `<span class="badge badge-outline-yellow" title="Currently sending">Sending...</span>`;
   }
   if (status === "Failed") {
-    return `<span class="badge badge-outline-red" title="Error: ${error || 'Unknown'}">Failed</span>`;
+    return `<div style="display:flex; flex-direction:column; gap:4px; align-items:flex-start;">
+              <span class="badge badge-outline-red" style="cursor:help;">Failed</span>
+              <span style="font-size: 10px; color: var(--color-rose); max-width: 150px; white-space: normal; word-break: break-word; line-height: 1.2;">${error || 'Unknown Error'}</span>
+            </div>`;
   }
   return `<span class="badge badge-outline-gray">Pending</span>`;
 }
@@ -1615,62 +2217,195 @@ function renderTemplate(templateStr, rec) {
 
 // Render Live Preview Card
 function updateLivePreview() {
-  const dropdown = document.getElementById("preview-recipient-dropdown");
-  const selectedId = dropdown.value;
+  const container = document.getElementById("preview-workspace");
+  if (!container) return;
   
-  const rec = state.recipients.find(r => r.id === selectedId);
-  
-  // Header details display
-  const accId = rec ? rec.senderAccountId : state.template.senderAccountId;
-  const acc = (state.settings.senderAccounts || []).find(a => a.id === accId) || (state.settings.senderAccounts || []).find(a => a.isDefault);
-  document.getElementById("preview-sender-display").innerHTML = acc
-    ? `${escapeHtml(acc.label)} &lt;${escapeHtml(acc.user)}&gt;`
-    : `No Sender Account Configured`;
-
-  const ccVal = rec ? (rec.cc || state.template.cc || "") : (state.template.cc || "");
-  const bccVal = rec ? (rec.bcc || state.template.bcc || "") : (state.template.bcc || "");
-
-  const ccRow = document.getElementById("preview-cc-row");
-  const ccDisplay = document.getElementById("preview-cc-display");
-  if (ccRow && ccDisplay) {
-    if (ccVal) {
-      ccRow.classList.remove("hidden");
-      ccDisplay.textContent = ccVal;
-    } else {
-      ccRow.classList.add("hidden");
-    }
-  }
-
-  const bccRow = document.getElementById("preview-bcc-row");
-  const bccDisplay = document.getElementById("preview-bcc-display");
-  if (bccRow && bccDisplay) {
-    if (bccVal) {
-      bccRow.classList.remove("hidden");
-      bccDisplay.textContent = bccVal;
-    } else {
-      bccRow.classList.add("hidden");
-    }
-  }
-
-  if (!rec) {
-    document.getElementById("preview-to-display").textContent = "recipient@domain.com";
-    document.getElementById("preview-subject-display").textContent = state.template.subject || "No Subject";
-    document.getElementById("preview-time-display").textContent = "Immediate";
-    
-    const bodyTemplate = state.template.body || "Compose template body...";
-    document.getElementById("preview-body-display").innerHTML = bodyTemplate;
+  if (state.recipients.length === 0) {
+    container.style.flexDirection = "column";
+    container.innerHTML = `<div class="text-muted" style="font-size: 15px; font-weight: 500;">Please import an Excel file and select a recipient to preview.</div>`;
     return;
   }
-
-  const subject = renderTemplate(state.template.subject, rec);
-  const body = renderTemplate(state.template.body, rec);
-
-  document.getElementById("preview-to-display").textContent = `${rec.name} <${rec.email}>`;
-  document.getElementById("preview-subject-display").textContent = subject || "(No Subject)";
-  document.getElementById("preview-time-display").textContent = rec.parsedTime ? rec.parsedTime.toLocaleString() : "Immediate";
   
-  // Format body for display in preview
-  document.getElementById("preview-body-display").innerHTML = body;
+  const dropdown = document.getElementById("preview-recipient-dropdown");
+  const selectedId = dropdown.value;
+  const rec = state.recipients.find(r => r.id === selectedId) || state.recipients[0];
+  if (!rec) return;
+
+  const showAll = state.previewLayout === "all";
+  
+  if (showAll) {
+    container.style.flexDirection = "row";
+    container.style.flexWrap = "wrap";
+    container.style.justifyContent = "center";
+    container.style.gap = "20px";
+    container.style.alignItems = "flex-start";
+    
+    container.innerHTML = "";
+    state.templates.forEach(t => {
+      const subject = renderTemplate(t.subject, rec);
+      const body = renderTemplate(t.body, rec);
+      
+      const accId = rec.senderAccountId || t.senderAccountId;
+      const acc = (state.settings.senderAccounts || []).find(a => a.id === accId) || (state.settings.senderAccounts || []).find(a => a.isDefault);
+      const displaySenderName = getFinalSenderName(rec, acc);
+      const senderStr = acc ? `${escapeHtml(displaySenderName)} &lt;${escapeHtml(acc.user)}&gt;` : `No Sender Account Configured`;
+      
+      let ccBccHtml = "";
+      if (t.cc) {
+        ccBccHtml += `<div class="email-meta-line"><span class="meta-label">Cc:</span><span class="meta-val text-teal">${escapeHtml(t.cc)}</span></div>`;
+      }
+      if (t.bcc) {
+        ccBccHtml += `<div class="email-meta-line"><span class="meta-label">Bcc:</span><span class="meta-val text-teal">${escapeHtml(t.bcc)}</span></div>`;
+      }
+      
+      const frame = document.createElement("div");
+      frame.className = "email-mockup-frame";
+      frame.style.width = "480px";
+      frame.style.height = "420px";
+      frame.style.maxWidth = "100%";
+      frame.innerHTML = `
+        <div class="email-mockup-header">
+          <div class="mockup-dot red"></div>
+          <div class="mockup-dot yellow"></div>
+          <div class="mockup-dot green"></div>
+          <div class="mockup-title" style="color: var(--color-indigo); font-weight: 700;">Template: ${escapeHtml(t.name)}</div>
+        </div>
+        <div class="email-mockup-content" style="flex-grow: 1; display: flex; flex-direction: column; overflow-y: auto;">
+          <div class="email-meta-line">
+            <span class="meta-label">From:</span>
+            <span class="meta-val">${senderStr}</span>
+          </div>
+          <div class="email-meta-line">
+            <span class="meta-label">To:</span>
+            <span class="meta-val text-teal">${escapeHtml(rec.name)} &lt;${escapeHtml(rec.email)}&gt;</span>
+          </div>
+          ${ccBccHtml}
+          <div class="email-meta-line">
+            <span class="meta-label">Subject:</span>
+            <span class="meta-val text-bold">${escapeHtml(subject || '(No Subject)')}</span>
+          </div>
+          <div class="email-meta-line border-bottom">
+            <span class="meta-label">Schedule:</span>
+            <span class="meta-val text-indigo">${rec.parsedTime ? rec.parsedTime.toLocaleString() : 'Immediate'}</span>
+          </div>
+          <div class="email-body-pane" style="flex-grow: 1; padding: 16px; min-height: 150px; background: white; overflow-y: auto;">
+            ${body}
+          </div>
+        </div>
+      `;
+      container.appendChild(frame);
+    });
+  } else {
+    container.style.flexDirection = "column";
+    container.style.flexWrap = "nowrap";
+    container.style.justifyContent = "center";
+    container.style.alignItems = "center";
+    container.style.gap = "0";
+    
+    const previewTemplateId = document.getElementById("preview-template-dropdown").value || state.activeTemplateId;
+    const t = state.templates.find(temp => temp.id === previewTemplateId) || state.templates[0];
+    if (!t) return;
+    
+    const subject = renderTemplate(t.subject, rec);
+    const body = renderTemplate(t.body, rec);
+    
+    const accId = rec.senderAccountId || t.senderAccountId;
+    const acc = (state.settings.senderAccounts || []).find(a => a.id === accId) || (state.settings.senderAccounts || []).find(a => a.isDefault);
+    const displaySenderName = getFinalSenderName(rec, acc);
+    const senderStr = acc ? `${escapeHtml(displaySenderName)} &lt;${escapeHtml(acc.user)}&gt;` : `No Sender Account Configured`;
+    
+    let ccBccHtml = "";
+    if (t.cc) {
+      ccBccHtml += `<div class="email-meta-line"><span class="meta-label">Cc:</span><span class="meta-val text-teal">${escapeHtml(t.cc)}</span></div>`;
+    }
+    if (t.bcc) {
+      ccBccHtml += `<div class="email-meta-line"><span class="meta-label">Bcc:</span><span class="meta-val text-teal">${escapeHtml(t.bcc)}</span></div>`;
+    }
+    
+    container.innerHTML = `
+      <div class="email-mockup-frame">
+        <div class="email-mockup-header">
+          <div class="mockup-dot red"></div>
+          <div class="mockup-dot yellow"></div>
+          <div class="mockup-dot green"></div>
+          <div class="mockup-title">Vesper Mail Client View</div>
+        </div>
+        <div class="email-mockup-content" style="flex-grow: 1; display: flex; flex-direction: column; overflow-y: auto;">
+          <div class="email-meta-line">
+            <span class="meta-label">From:</span>
+            <span class="meta-val">${senderStr}</span>
+          </div>
+          <div class="email-meta-line">
+            <span class="meta-label">To:</span>
+            <span class="meta-val text-teal">${escapeHtml(rec.name)} &lt;${escapeHtml(rec.email)}&gt;</span>
+          </div>
+          ${ccBccHtml}
+          <div class="email-meta-line">
+            <span class="meta-label">Subject:</span>
+            <span class="meta-val text-bold">${escapeHtml(subject || '(No Subject)')}</span>
+          </div>
+          <div class="email-meta-line border-bottom">
+            <span class="meta-label">Schedule:</span>
+            <span class="meta-val text-indigo">${rec.parsedTime ? rec.parsedTime.toLocaleString() : 'Immediate'}</span>
+          </div>
+          <div class="email-body-pane" style="flex-grow: 1; padding: 16px; min-height: 150px; background: white; overflow-y: auto;">
+            ${body}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+}
+
+function populatePreviewTemplateSelector() {
+  const select = document.getElementById("preview-template-dropdown");
+  if (!select) return;
+  select.innerHTML = "";
+  
+  if (!state.templates || state.templates.length === 0) {
+    select.innerHTML = `<option value="">-- No Templates --</option>`;
+    return;
+  }
+  
+  state.templates.forEach(t => {
+    const opt = document.createElement("option");
+    opt.value = t.id;
+    opt.textContent = t.name;
+    if (t.id === state.activeTemplateId) {
+      opt.selected = true;
+    }
+    select.appendChild(opt);
+  });
+}
+
+let pollingInterval = null;
+
+function startPollingState() {
+  if (pollingInterval) return;
+  pollingInterval = setInterval(async () => {
+    try {
+      await loadConfigFromServer();
+      if (document.getElementById("tab-queue").classList.contains("active")) {
+        renderQueueTable();
+      }
+      updateSummaryStats();
+      
+      if (state.settings && !state.settings.schedulerActive) {
+        state.schedulerActive = false;
+        updateSchedulerUIState();
+        stopPollingState();
+      }
+    } catch (e) {
+      console.error("Polling error:", e);
+    }
+  }, 4000);
+}
+
+function stopPollingState() {
+  if (pollingInterval) {
+    clearInterval(pollingInterval);
+    pollingInterval = null;
+  }
 }
 
 // Start Engine
@@ -1678,13 +2413,21 @@ function startSchedulerEngine() {
   if (state.schedulerActive) return;
 
   state.schedulerActive = true;
+  state.settings.schedulerActive = true;
+  saveSettingsToCache();
   updateSchedulerUIState();
-  addLog("Scheduler Engine Started. Processing active queue...", "success");
-  showToast("Scheduler Engine Started!", "success");
-
-  // Run immediately and then hook interval check
-  processSchedulerStep();
-  schedulerInterval = setInterval(processSchedulerStep, 1000);
+  
+  const isServerMode = window.location.protocol.startsWith("http");
+  if (isServerMode) {
+    addLog("Cloud Scheduler Activated. Queue is running in the cloud background 24/7.", "success");
+    showToast("Background Scheduler Activated!", "success");
+    startPollingState();
+  } else {
+    addLog("Local Browser Scheduler Activated. Keep tab open to process the queue.", "success");
+    showToast("Local Scheduler Activated!", "success");
+    processSchedulerStep();
+    schedulerInterval = setInterval(processSchedulerStep, 1000);
+  }
 }
 
 // Stop Engine
@@ -1692,13 +2435,23 @@ function stopSchedulerEngine() {
   if (!state.schedulerActive) return;
 
   state.schedulerActive = false;
+  state.settings.schedulerActive = false;
+  saveSettingsToCache();
   updateSchedulerUIState();
-  if (schedulerInterval) {
-    clearInterval(schedulerInterval);
-    schedulerInterval = null;
+  
+  const isServerMode = window.location.protocol.startsWith("http");
+  if (isServerMode) {
+    stopPollingState();
+    addLog("Cloud Scheduler Stopped/Cancelled.", "warning");
+    showToast("Background Scheduler Stopped", "warning");
+  } else {
+    if (schedulerInterval) {
+      clearInterval(schedulerInterval);
+      schedulerInterval = null;
+    }
+    addLog("Local Browser Scheduler Stopped.", "warning");
+    showToast("Local Scheduler Stopped", "warning");
   }
-  addLog("Scheduler Engine Paused.", "warning");
-  showToast("Scheduler Engine Paused", "warning");
 }
 
 function toggleScheduler() {
@@ -1768,16 +2521,44 @@ function processSchedulerStep() {
   });
 }
 
+// Resolve final sender display name from recipient (Excel Sender column) or account settings
+function getFinalSenderName(rec, acc) {
+  if (rec) {
+    if (rec.senderName && rec.senderName.trim()) {
+      return rec.senderName.trim();
+    }
+    if (rec.sender && rec.sender.trim()) {
+      const s = rec.sender.trim();
+      if (s.includes('<') && s.includes('>')) {
+        const namePart = s.split('<')[0].trim().replace(/^["'\s]+|["'\s]+$/g, '');
+        if (namePart) return namePart;
+      }
+      if (!s.includes('@') || s.includes(' ')) {
+        return s;
+      }
+    }
+  }
+  if (acc && acc.label && acc.label.trim()) {
+    return acc.label.trim();
+  }
+  if (acc && acc.user && acc.user.trim()) {
+    return acc.user.trim();
+  }
+  return "";
+}
+
 // Send actual email trigger
 function dispatchEmail(rec) {
   rec.status = "Sending";
   updateRecStatusUI(rec);
   updateSummaryStats();
 
-  const subject = renderTemplate(state.template.subject, rec);
-  const body = renderTemplate(state.template.body, rec);
+  const templateId = rec.templateId || state.activeTemplateId;
+  const jobTemplate = state.templates.find(t => t.id === templateId) || state.templates[0];
+  const subject = renderTemplate(jobTemplate.subject, rec);
+  const body = renderTemplate(jobTemplate.body, rec);
 
-  const accId = rec.senderAccountId || state.template.senderAccountId;
+  const accId = rec.senderAccountId || jobTemplate.senderAccountId;
   const acc = (state.settings.senderAccounts || []).find(a => a.id === accId) || (state.settings.senderAccounts || []).find(a => a.isDefault);
 
   if (!acc) {
@@ -1788,6 +2569,8 @@ function dispatchEmail(rec) {
   const isDraft = rec.action === "draft";
   const logAction = isDraft ? "draft upload" : "SMTP transaction";
   addLog(`[Local Server] Routing ${logAction} for ${rec.name} using account ${acc.label} (${acc.user})...`, "system");
+
+  const finalSenderName = getFinalSenderName(rec, acc);
 
   fetch(state.settings.localUrl, {
     method: "POST",
@@ -1801,7 +2584,7 @@ function dispatchEmail(rec) {
       secure: acc.secure,
       user: acc.user,
       pass: acc.pass,
-      senderEmail: acc.user,
+      senderEmail: finalSenderName,
       recipientEmail: rec.email,
       cc: rec.cc || "",
       bcc: rec.bcc || "",
@@ -1917,7 +2700,7 @@ function sendTestEmail() {
   });
 }
 
-// Generate sample excel spreadsheet downloader
+// Generate sample excel spreadsheet downloader with S_Date and S_Time columns
 function downloadSampleExcel() {
   try {
     const now = new Date();
@@ -1926,31 +2709,42 @@ function downloadSampleExcel() {
     const t2 = new Date(now.getTime() + 15 * 60 * 1000); // 15 mins later
     const t3 = new Date(now.getTime() + 60 * 60 * 1000); // 1 hr later
 
-    const formatTime = (d) => {
+    const formatDate = (d) => {
       const yyyy = d.getFullYear();
       const mm = String(d.getMonth() + 1).padStart(2, "0");
       const dd = String(d.getDate()).padStart(2, "0");
+      return `${yyyy}-${mm}-${dd}`;
+    };
+
+    const formatTimeOnly = (d) => {
       const hh = String(d.getHours()).padStart(2, "0");
       const min = String(d.getMinutes()).padStart(2, "0");
       const sec = String(d.getSeconds()).padStart(2, "0");
-      return `${yyyy}-${mm}-${dd} ${hh}:${min}:${sec}`;
+      return `${hh}:${min}:${sec}`;
     };
 
-    const data = [
-      ["Name", "Email", "Affiliation", "Date", "Technical Schedual Name", "Time", "CC", "BCC", "Sender", "Action", "S_Time"],
-      ["Devin Allen", "devin@example.com", "Acme Corporation", "2026-07-15", "Routine Maintenance", "10:00 AM", "manager@acme.com", "", "sender1@gmail.com", "send", formatTime(t1)],
-      ["Elena Rostova", "elena@example.com", "Apex Labs", "2026-07-16", "Database Upgrade", "02:30 PM", "", "", "sender2@gmail.com", "draft", formatTime(t2)],
-      ["Dr. Marcus Vance", "marcus@example.com", "Stanford University", "2026-07-17", "Server Deployment", "11:15 AM", "admin@stanford.edu", "archive@stanford.edu", "", "send", formatTime(t3)],
-      ["Sarah Jenkins", "sarah@example.com", "Freelance", "2026-07-18", "API Integration", "04:30 PM", "", "", "", "draft", "04:30 PM"]
+    const sheet1Data = [
+      ["Name", "Email", "Affiliation", "Template", "Date", "Technical Schedual Name", "S_Date", "S_Time", "CC", "BCC", "Sender", "Action"],
+      ["Devin Allen", "devin@example.com", "Acme Corporation", "Default Template", "2026-07-15", "Routine Maintenance", formatDate(t1), formatTimeOnly(t1), "manager@acme.com", "", "sender1@gmail.com", "send"],
+      ["Elena Rostova", "elena@example.com", "Apex Labs", "Default Template", "2026-07-16", "Database Upgrade", formatDate(t2), formatTimeOnly(t2), "", "", "sender2@gmail.com", "draft"]
     ];
 
-    const worksheet = XLSX.utils.aoa_to_sheet(data);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Recipients");
+    const sheet2Data = [
+      ["Name", "Email", "Affiliation", "Template", "Date", "Technical Schedual Name", "S_Date", "S_Time", "CC", "BCC", "Sender", "Action"],
+      ["Dr. Marcus Vance", "marcus@example.com", "Stanford University", "Executive Follow-up", "2026-07-17", "Server Deployment", formatDate(t3), formatTimeOnly(t3), "admin@stanford.edu", "archive@stanford.edu", "", "send"],
+      ["Sarah Jenkins", "sarah@example.com", "Freelance", "Executive Follow-up", "2026-07-18", "API Integration", formatDate(now), "04:30 PM", "", "", "", "draft"]
+    ];
 
-    XLSX.writeFile(workbook, "vesper_scheduler_template.xlsx");
-    showToast("Downloaded sample Excel template!", "success");
-    addLog("Generated and downloaded sample Excel workbook.", "system");
+    const workbook = XLSX.utils.book_new();
+    const ws1 = XLSX.utils.aoa_to_sheet(sheet1Data);
+    const ws2 = XLSX.utils.aoa_to_sheet(sheet2Data);
+
+    XLSX.utils.book_append_sheet(workbook, ws1, "Campaign A - Standard");
+    XLSX.utils.book_append_sheet(workbook, ws2, "Campaign B - Executives");
+
+    XLSX.writeFile(workbook, "vesper_sdate_stime_sample.xlsx");
+    showToast("Downloaded S_Date & S_Time sample Excel file!", "success");
+    addLog("Generated and downloaded S_Date & S_Time sample Excel workbook.", "system");
 
   } catch (err) {
     showToast(`Template download failed: ${err.message}`, "error");
@@ -2162,6 +2956,7 @@ function populateSenderDropdowns() {
 
   if (!state.settings.senderAccounts || state.settings.senderAccounts.length === 0) {
     dropdown.innerHTML = `<option value="">-- No Accounts Configured --</option>`;
+    updateComposeReadOnlyConfig();
     return;
   }
 
@@ -2180,6 +2975,25 @@ function populateSenderDropdowns() {
 
   if (state.template.senderAccountId) {
     dropdown.value = state.template.senderAccountId;
+  }
+  
+  updateComposeReadOnlyConfig();
+}
+
+function updateComposeReadOnlyConfig() {
+  const senderEl = document.getElementById("email-sender-template-read-only");
+  const actionEl = document.getElementById("email-action-template-read-only");
+  
+  if (senderEl) {
+    const activeAcc = (state.settings.senderAccounts || []).find(a => a.isDefault);
+    senderEl.textContent = activeAcc 
+      ? `${activeAcc.label} <${activeAcc.user}>` 
+      : "-- No Accounts Configured (Go to Configuration) --";
+  }
+  
+  if (actionEl) {
+    const isDraft = state.settings.method === "localserver_draft";
+    actionEl.textContent = isDraft ? "IMAP Drafts" : "SMTP Send";
   }
 }
 
@@ -2289,16 +3103,7 @@ function htmlToPlainText(html) {
   return tempDoc.body.textContent || tempDoc.body.innerText || text;
 }
 
-// Sync the theme button icon based on active theme
-function updateThemeToggleIcon(theme) {
-  const btn = document.getElementById("theme-toggle-btn");
-  if (!btn) return;
-  if (theme === "dark") {
-    btn.innerHTML = `<i data-lucide="sun"></i>`;
-  } else {
-    btn.innerHTML = `<i data-lucide="moon"></i>`;
-  }
-}
+
 
 // Dynamic Column Mapping Helpers
 function updateTableHeadersWithLetters(mappings) {
@@ -2358,4 +3163,144 @@ function updateMergeTagsMenu(columnKeys, headerRow) {
   });
   
   lucide.createIcons();
+}
+
+// -------------------------------------------------------------
+// TEMPLATE MANAGEMENT FUNCTIONS
+// -------------------------------------------------------------
+
+function populateTemplateSelector() {
+  const select = document.getElementById("composer-template-selector");
+  if (!select) return;
+  select.innerHTML = "";
+  
+  if (!state.templates) {
+    state.templates = [];
+  }
+  
+  state.templates.forEach(t => {
+    const count = state.recipients ? state.recipients.filter(r => (r.templateId || state.activeTemplateId) === t.id).length : 0;
+    const opt = document.createElement("option");
+    opt.value = t.id;
+    opt.textContent = `${t.name} (${count} recipient${count === 1 ? '' : 's'})`;
+    if (t.id === state.activeTemplateId) {
+      opt.selected = true;
+    }
+    select.appendChild(opt);
+  });
+}
+
+function handleTemplateChange(templateId) {
+  const t = state.templates.find(temp => temp.id === templateId);
+  if (!t) return;
+  
+  state.activeTemplateId = templateId;
+  state.template = t; // Update the reference so existing event handlers modify the correct template!
+  
+  // Save active template id to cache
+  localStorage.setItem("vesper_active_template_id", templateId);
+  
+  // Update fields in compose editor
+  document.getElementById("email-subject-template").value = t.subject || "";
+  document.getElementById("email-cc-template").value = t.cc || "";
+  document.getElementById("email-bcc-template").value = t.bcc || "";
+  
+  let bodyHtml = t.body || "";
+  if (bodyHtml && !bodyHtml.includes("<") && !bodyHtml.includes(">")) {
+    bodyHtml = bodyHtml.replace(/\n/g, "<br>");
+  }
+  const bodyEditor = document.getElementById("email-body-editor");
+  if (bodyEditor) {
+    bodyEditor.innerHTML = bodyHtml;
+  }
+  
+  // CC / BCC visibility sync
+  const rowCc = document.getElementById("cc-field-row");
+  const rowBcc = document.getElementById("bcc-field-row");
+  if (rowCc) {
+    if (t.cc) rowCc.classList.remove("hidden");
+    else rowCc.classList.add("hidden");
+  }
+  if (rowBcc) {
+    if (t.bcc) rowBcc.classList.remove("hidden");
+    else rowBcc.classList.add("hidden");
+  }
+  
+  updateComposeReadOnlyConfig();
+  updateLivePreview();
+}
+
+function createNewTemplate() {
+  const name = prompt("Enter a name for the new template:", "New Template");
+  if (!name || !name.trim()) return;
+  
+  const id = `template-${Date.now()}`;
+  const newT = {
+    id: id,
+    name: name.trim(),
+    subject: "Quick question regarding {Affiliation}",
+    cc: "",
+    bcc: "",
+    body: "Hi {Name},\n\nThis is your custom template body.",
+    senderAccountId: "",
+    action: "send"
+  };
+  
+  state.templates.push(newT);
+  localStorage.setItem("vesper_templates", JSON.stringify(state.templates));
+  
+  populateTemplateSelector();
+  populatePreviewTemplateSelector();
+  handleTemplateChange(id);
+  showToast(`Created template: ${name.trim()}`, "success");
+  
+  // Refresh queue details and dropdown lists
+  renderQueueTable();
+}
+
+function renameTemplate() {
+  const t = state.templates.find(temp => temp.id === state.activeTemplateId);
+  if (!t) return;
+  
+  const newName = prompt(`Rename template "${t.name}" to:`, t.name);
+  if (!newName || !newName.trim()) return;
+  
+  t.name = newName.trim();
+  localStorage.setItem("vesper_templates", JSON.stringify(state.templates));
+  
+  populateTemplateSelector();
+  populatePreviewTemplateSelector();
+  showToast(`Renamed template to: ${t.name}`, "success");
+  
+  // Refresh queue details and dropdown lists
+  renderQueueTable();
+}
+
+function deleteTemplate() {
+  if (state.templates.length <= 1) {
+    showToast("You must keep at least one template.", "warning");
+    return;
+  }
+  
+  const t = state.templates.find(temp => temp.id === state.activeTemplateId);
+  if (!t) return;
+  
+  if (!confirm(`Are you sure you want to delete template "${t.name}"?`)) {
+    return;
+  }
+  
+  const deletedIndex = state.templates.findIndex(temp => temp.id === state.activeTemplateId);
+  state.templates = state.templates.filter(temp => temp.id !== state.activeTemplateId);
+  localStorage.setItem("vesper_templates", JSON.stringify(state.templates));
+  
+  // Switch to the first template
+  const newActiveId = state.templates[0].id;
+  populateTemplateSelector();
+  populatePreviewTemplateSelector();
+  handleTemplateChange(newActiveId);
+  
+  showToast(`Deleted template: ${t.name}`, "info");
+  
+  // Refresh queue details and dropdown lists
+  renderQueueTable();
 }
